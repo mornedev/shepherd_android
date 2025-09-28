@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.myapplication"
+    namespace = "com.mamlambofossils.shepherd"
     compileSdk = 36
 
     defaultConfig {

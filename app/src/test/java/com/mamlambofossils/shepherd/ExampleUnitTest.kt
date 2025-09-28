@@ -1,4 +1,4 @@
-package com.example.myapplication
+package com.mamlambofossils.shepherd
 
 import org.junit.Test
 
