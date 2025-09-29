@@ -4,6 +4,11 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// Read API base URL from Gradle property or environment variable with a sensible default
+val apiBaseUrl: String = (project.findProperty("API_BASE_URL") as String?)
+    ?: System.getenv("API_BASE_URL")
+    ?: "https://legacyshepherd-api-601845597651.australia-southeast1.run.app"
+
 android {
     namespace = "com.mamlambofossils.shepherd"
     compileSdk = 36
@@ -16,6 +21,9 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Make API base URL available in BuildConfig
+        buildConfigField("String", "API_BASE_URL", "\"${apiBaseUrl}\"")
     }
 
     buildTypes {
@@ -36,6 +44,7 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 }
 

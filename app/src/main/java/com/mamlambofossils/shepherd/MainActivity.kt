@@ -18,11 +18,16 @@ import io.github.jan.supabase.gotrue.ExternalAuthAction
 import io.github.jan.supabase.gotrue.handleDeeplinks
 import io.github.jan.supabase.gotrue.providers.Google
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import io.github.jan.supabase.gotrue.SessionStatus
+import kotlinx.coroutines.flow.collect
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var appBarConfiguration: AppBarConfiguration
     private lateinit var binding: ActivityMainBinding
+    private var hasNavigatedAfterLogin = false
 
     // Supabase client configured for Android OAuth deep links
     private val supabase by lazy {
@@ -34,18 +39,26 @@ class MainActivity : AppCompatActivity() {
                 // Must match the intent-filter in AndroidManifest.xml
                 host = "auth"
                 scheme = "legacyshepherd"
-                // Use Chrome Custom Tabs for OAuth on Android
                 defaultExternalAuthAction = ExternalAuthAction.CustomTabs()
             }
         }
     }
 
+    // API base URL from BuildConfig (configured via Gradle property or environment)
+    fun getApiBaseUrl(): String = BuildConfig.API_BASE_URL
+
+    // Retrieve the current access token for Authorization: Bearer
+    suspend fun getAccessToken(): String? {
+        // Prefer current session's access token
+        val session = supabase.auth.currentSessionOrNull()
+        return session?.accessToken
+    }
+    
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-
         setSupportActionBar(binding.toolbar)
 
         val navController = findNavController(R.id.nav_host_fragment_content_main)
@@ -54,6 +67,26 @@ class MainActivity : AppCompatActivity() {
 
         // Handle OAuth/OTP deep links from Supabase
         supabase.handleDeeplinks(intent)
+        // After handling deep link, try navigate to Welcome if logged in
+        navigateToWelcomeIfLoggedIn()
+
+        // Observe session changes to navigate as soon as we're authenticated
+        lifecycleScope.launch {
+            supabase.auth.sessionStatus.collect { status ->
+                if (status is SessionStatus.Authenticated) {
+                    if (!hasNavigatedAfterLogin) {
+                        hasNavigatedAfterLogin = true
+                        navigateToWelcomeIfLoggedIn()
+                    }
+                    // hide FAB when logged in
+                    binding.fab.hide()
+                } else {
+                    // reset flag and show FAB when not authenticated
+                    hasNavigatedAfterLogin = false
+                    binding.fab.show()
+                }
+            }
+        }
 
         // Click to sign in with Google via Supabase
         binding.fab.setOnClickListener { view ->
@@ -86,7 +119,15 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         if (intent != null) {
             supabase.handleDeeplinks(intent)
+            // After new intent handled (OAuth callback), try navigate
+            navigateToWelcomeIfLoggedIn()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // When coming back from Custom Tabs, ensure we navigate if already authenticated
+        navigateToWelcomeIfLoggedIn()
     }
 
     override fun onSupportNavigateUp(): Boolean {
@@ -98,6 +139,28 @@ class MainActivity : AppCompatActivity() {
     fun startGoogleSignIn() {
         lifecycleScope.launch {
             supabase.auth.signInWith(io.github.jan.supabase.gotrue.providers.Google)
+        }
+    }
+
+    private fun navigateToWelcomeIfLoggedIn() {
+        lifecycleScope.launch {
+            val user = supabase.auth.currentUserOrNull()
+            if (user != null) {
+                val meta = user.userMetadata
+                val fullName = meta?.get("name")?.jsonPrimitive?.contentOrNull
+                    ?: meta?.get("full_name")?.jsonPrimitive?.contentOrNull
+                    ?: meta?.get("given_name")?.jsonPrimitive?.contentOrNull
+                val firstName = (fullName?.substringBefore(" ") ?: "there")
+
+                val navController = findNavController(R.id.nav_host_fragment_content_main)
+                // Avoid re-navigating if we're already on the destination
+                if (navController.currentDestination?.id != R.id.SecondFragment) {
+                    val args = android.os.Bundle().apply { putString("firstName", firstName) }
+                    navController.navigate(R.id.SecondFragment, args)
+                }
+                // Hide the sign-in FAB once logged in
+                binding.fab.hide()
+            }
         }
     }
 }
