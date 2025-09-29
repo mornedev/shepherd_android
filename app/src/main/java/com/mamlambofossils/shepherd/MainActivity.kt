@@ -9,12 +9,15 @@ import androidx.navigation.ui.navigateUp
 import androidx.navigation.ui.setupActionBarWithNavController
 import android.view.Menu
 import android.view.MenuItem
+import androidx.lifecycle.lifecycleScope
 import com.mamlambofossils.shepherd.databinding.ActivityMainBinding
-import io.github.jan.tennert.supabase.createSupabaseClient
-import io.github.jan.tennert.supabase.gotrue.Auth
-import io.github.jan.tennert.supabase.gotrue.ExternalAuthAction
-import io.github.jan.tennert.supabase.gotrue.handleDeeplinks
-import io.github.jan.tennert.supabase.gotrue.providers.builtin.Google
+import io.github.jan.supabase.createSupabaseClient
+import io.github.jan.supabase.gotrue.Auth
+import io.github.jan.supabase.gotrue.auth
+import io.github.jan.supabase.gotrue.ExternalAuthAction
+import io.github.jan.supabase.gotrue.handleDeeplinks
+import io.github.jan.supabase.gotrue.providers.Google
+import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
 
@@ -55,7 +58,9 @@ class MainActivity : AppCompatActivity() {
         // Click to sign in with Google via Supabase
         binding.fab.setOnClickListener { view ->
             // Launch Google OAuth. On success, a deep link will be delivered to this Activity.
-            supabase.auth.signInWith(Google)
+            lifecycleScope.launch {
+                supabase.auth.signInWith(io.github.jan.supabase.gotrue.providers.Google)
+            }
             Snackbar.make(view, "Launching Google sign-in...", Snackbar.LENGTH_SHORT)
                 .setAnchorView(R.id.fab).show()
         }
@@ -88,5 +93,11 @@ class MainActivity : AppCompatActivity() {
         val navController = findNavController(R.id.nav_host_fragment_content_main)
         return navController.navigateUp(appBarConfiguration)
                 || super.onSupportNavigateUp()
+    }
+
+    fun startGoogleSignIn() {
+        lifecycleScope.launch {
+            supabase.auth.signInWith(io.github.jan.supabase.gotrue.providers.Google)
+        }
     }
 }

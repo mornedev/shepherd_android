@@ -9,7 +9,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.myapplication"
+        applicationId = "com.mamlambofossils.shepherd"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
@@ -47,10 +47,16 @@ dependencies {
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.navigation.fragment.ktx)
     implementation(libs.androidx.navigation.ui.ktx)
-    // Supabase Auth (GoTrue) with Ktor Android engine
-    implementation(platform(libs.supabase.bom))
-    implementation(libs.supabase.auth)
-    implementation(libs.ktor.client.android)
+    // Coroutines + lifecycle scope for launching suspend calls from Activity
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+    // Supabase + Ktor (explicit coordinates to unblock immediately)
+    implementation(platform("io.github.jan-tennert.supabase:bom:2.5.0"))
+    implementation("io.github.jan-tennert.supabase:supabase-kt") // provides createSupabaseClient
+    implementation("io.github.jan-tennert.supabase:gotrue-kt")
+    implementation("io.github.jan-tennert.supabase:postgrest-kt")
+    implementation("io.github.jan-tennert.supabase:storage-kt")
+    implementation("io.github.jan-tennert.supabase:realtime-kt")
+    implementation("io.ktor:ktor-client-android:2.3.11")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
