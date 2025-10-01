@@ -115,13 +115,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onNewIntent(intent: android.content.Intent?) {
+    override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
-        if (intent != null) {
-            supabase.handleDeeplinks(intent)
-            // After new intent handled (OAuth callback), try navigate
-            navigateToWelcomeIfLoggedIn()
-        }
+        supabase.handleDeeplinks(intent)
+        // After new intent handled (OAuth callback), try navigate
+        navigateToWelcomeIfLoggedIn()
     }
 
     override fun onResume() {
