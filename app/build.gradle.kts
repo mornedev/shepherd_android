@@ -79,6 +79,10 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.navigation:navigation-compose:2.8.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // Coil for image loading
+    implementation("io.coil-kt:coil-compose:2.5.0")
+    // SLF4J Android implementation to suppress warnings
+    implementation("org.slf4j:slf4j-android:1.7.36")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
