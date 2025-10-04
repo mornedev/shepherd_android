@@ -42,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,6 +56,8 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.google.accompanist.swiperefresh.SwipeRefresh
+import com.google.accompanist.swiperefresh.rememberSwipeRefreshState
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -650,6 +653,7 @@ private fun WelcomeScreen(firstName: String, collectionName: String?, onAddItem:
     val activity = LocalContext.current as ComposeMainActivity
     var items by remember { mutableStateOf<List<ItemData>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         isLoading = true
@@ -657,33 +661,56 @@ private fun WelcomeScreen(firstName: String, collectionName: String?, onAddItem:
         isLoading = false
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(PaddingValues(16.dp)),
-        verticalArrangement = Arrangement.Top,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(text = "${firstName}'s Legacy", style = MaterialTheme.typography.headlineMedium)
-        Button(onClick = onAddItem, modifier = Modifier.padding(top = 16.dp)) {
-            Text(if (items.isEmpty()) "Start your legacy!" else "Add Item")
-        }
+    val swipeRefreshState = rememberSwipeRefreshState(isRefreshing = isLoading)
 
-        if (isLoading) {
-            Text(text = "Loading items...", modifier = Modifier.padding(top = 24.dp))
-        } else if (items.isNotEmpty()) {
-            Text(
-                text = "Recent Items",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 24.dp, bottom = 16.dp)
-            )
-            ItemsGrid(items = items, onItemClick = onItemClick)
-        } else {
-            Text(
-                text = "You have not loaded any items yet",
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.padding(top = 24.dp)
-            )
+    SwipeRefresh(
+        state = swipeRefreshState,
+        onRefresh = {
+            scope.launch {
+                isLoading = true
+                items = fetchLatestItems(activity)
+                isLoading = false
+            }
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(PaddingValues(16.dp)),
+            verticalArrangement = Arrangement.Top,
+            horizontalAlignment = Alignment.Start
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Welcome, $firstName",
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                }
+                Button(onClick = onAddItem) { Text("Add Item") }
+            }
+
+            if (isLoading && items.isEmpty()) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                    CircularProgressIndicator()
+                }
+            } else if (items.isNotEmpty()) {
+                Text(
+                    text = "Recent Items",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(top = 24.dp, bottom = 16.dp)
+                )
+                ItemsGrid(items = items, onItemClick = onItemClick)
+            } else {
+                Text(
+                    text = "You have not loaded any items yet",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 24.dp)
+                )
+            }
         }
     }
 }
