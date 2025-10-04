@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -36,10 +37,12 @@ import androidx.compose.material.icons.filled.Close
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,10 +56,22 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.net.Uri
 import android.content.ContentResolver
+import android.content.ContentValues
+import android.media.MediaRecorder
+import android.provider.MediaStore
+import android.os.ParcelFileDescriptor
+import android.Manifest
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.gotrue.Auth
 import io.github.jan.supabase.gotrue.ExternalAuthAction
@@ -98,10 +113,16 @@ class ComposeMainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         // Handle OAuth/OTP deep links from Supabase
+        android.util.Log.d("AuthFlow", "onCreate called with intent: ${intent?.data}")
+        lifecycleScope.launch {
+            supabase.handleDeeplinks(intent)
+        }
         setContent {
             val nav = rememberNavController()
-            var collectionName by remember { mutableStateOf<String?>(null) }
-            var collectionId by remember { mutableStateOf<String?>(null) }
+            var collectionName by rememberSaveable { mutableStateOf<String?>(null) }
+            var collectionId by rememberSaveable { mutableStateOf<String?>(null) }
+            var isAuthenticating by rememberSaveable { mutableStateOf(false) }
+            var hasCompletedInitialAuth by rememberSaveable { mutableStateOf(false) }
             AppNav(
                 navController = nav,
                 onSignIn = {
@@ -111,13 +132,16 @@ class ComposeMainActivity : ComponentActivity() {
                     }
                 },
                 collectionName = collectionName,
-                collectionIdProvider = { collectionId }
+                collectionIdProvider = { collectionId },
+                isAuthenticating = isAuthenticating
             )
 
             // Observe session and navigate
             LaunchedEffect(Unit) {
                 supabase.auth.sessionStatus.collect { status ->
-                    if (status is SessionStatus.Authenticated) {
+                    android.util.Log.d("AuthFlow", "Session status changed: $status, hasCompletedInitialAuth=$hasCompletedInitialAuth")
+                    if (status is SessionStatus.Authenticated && !hasCompletedInitialAuth) {
+                        isAuthenticating = true
                         val user = supabase.auth.currentUserOrNull()
                         val meta = user?.userMetadata
                         val fullName = meta?.get("name")?.jsonPrimitive?.contentOrNull
@@ -191,6 +215,31 @@ class ComposeMainActivity : ComponentActivity() {
                                         conn.disconnect()
                                     }
                                 }
+                                // Fetch user's plan and log it
+                                withContext(Dispatchers.IO) {
+                                    val planUrl = URL(getApiBaseUrl().trimEnd('/') + "/user/plan")
+                                    val planConn = (planUrl.openConnection() as HttpURLConnection).apply {
+                                        requestMethod = "GET"
+                                        setRequestProperty("Authorization", "Bearer $token")
+                                        setRequestProperty("Accept", "application/json")
+                                        connectTimeout = 10000
+                                        readTimeout = 15000
+                                    }
+                                    try {
+                                        val planCode = planConn.responseCode
+                                        val planBody = (if (planCode in 200..299) planConn.inputStream else planConn.errorStream)
+                                            ?.bufferedReader()?.use { it.readText() } ?: ""
+                                        android.util.Log.d("UserPlan", "HTTP $planCode body=$planBody")
+                                        if (planCode in 200..299) {
+                                            val obj = try { Json.parseToJsonElement(planBody).jsonObject } catch (_: Exception) { null }
+                                            val planId = obj?.get("plan_id")?.jsonPrimitive?.contentOrNull
+                                            val numItems = obj?.get("number_items")?.jsonPrimitive?.content?.toIntOrNull()
+                                            android.util.Log.i("UserPlan", "plan_id=$planId number_items=$numItems")
+                                        }
+                                    } finally {
+                                        planConn.disconnect()
+                                    }
+                                }
                             }
                         } catch (e: Exception) {
                             android.util.Log.e("FetchCollections", "Exception: ${e.message}")
@@ -198,16 +247,30 @@ class ComposeMainActivity : ComponentActivity() {
                             collectionId = null
                             Toast.makeText(this@ComposeMainActivity, "Error loading collections", Toast.LENGTH_LONG).show()
                         }
-                        if (nav.currentDestination?.route?.startsWith("welcome/") != true) {
+                        // Only navigate to welcome if we're on the login screen
+                        // Don't navigate if we're already on welcome, addItem, or editItem screens
+                        val currentRoute = nav.currentDestination?.route
+                        if (currentRoute == "login") {
                             nav.navigate("welcome/$first") {
                                 popUpTo("login") { inclusive = true }
                             }
                         }
+                        hasCompletedInitialAuth = true
+                        isAuthenticating = false
                     } else {
-                        if (nav.currentDestination?.route != "login") {
-                            nav.navigate("login") {
-                                popUpTo(0)
+                        // Only route to login before initial auth is completed.
+                        // After initial auth, ignore transient NotAuthenticated emissions to avoid unintended navigation.
+                        if (!hasCompletedInitialAuth) {
+                            hasCompletedInitialAuth = false
+                            isAuthenticating = false
+                            if (nav.currentDestination?.route != "login") {
+                                nav.navigate("login") {
+                                    popUpTo(0)
+                                }
                             }
+                        } else {
+                            // Already past initial auth; do not auto-navigate on status changes.
+                            isAuthenticating = false
                         }
                     }
                 }
@@ -217,11 +280,32 @@ class ComposeMainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
+        android.util.Log.d("AuthFlow", "onNewIntent called with: ${intent.data}")
         supabase.handleDeeplinks(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        android.util.Log.d("ActivityLifecycle", "onResume called")
+    }
+
+    override fun onPause() {
+        super.onPause()
+        android.util.Log.d("ActivityLifecycle", "onPause called")
+    }
+
+    override fun onStop() {
+        super.onStop()
+        android.util.Log.d("ActivityLifecycle", "onStop called")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        android.util.Log.d("ActivityLifecycle", "onDestroy called")
     }
 }
 
-// Fetch a single item's details (id, title, description, image_url)
+// Fetch a single item's details (id, title, description, image_url, audio_url)
 suspend private fun fetchItemDetails(activity: ComposeMainActivity, itemId: String): ItemData? {
     return withContext(Dispatchers.IO) {
         try {
@@ -245,7 +329,9 @@ suspend private fun fetchItemDetails(activity: ComposeMainActivity, itemId: Stri
                         val title = obj["title"]?.jsonPrimitive?.contentOrNull ?: "Untitled"
                         val description = obj["description"]?.jsonPrimitive?.contentOrNull
                         val imageUrl = obj["image_url"]?.jsonPrimitive?.contentOrNull
-                        return@withContext ItemData(id, title, description, imageUrl)
+                        val audioUrl = obj["audio_url"]?.jsonPrimitive?.contentOrNull
+                        val status = obj["status"]?.jsonPrimitive?.contentOrNull
+                        return@withContext ItemData(id, title, description, imageUrl, audioUrl, status)
                     }
                 } else {
                     android.util.Log.e("FetchItem", "HTTP $code")
@@ -269,7 +355,9 @@ suspend private fun putItemMultipart(
     itemId: String,
     title: String?,
     description: String?,
-    newImageUri: Uri?
+    newImageUri: Uri?,
+    newAudioUri: Uri?,
+    deleteAudio: Boolean
 ): PostItemResult {
     return withContext(Dispatchers.IO) {
         val boundary = "----ShepherdBoundary" + System.currentTimeMillis()
@@ -296,12 +384,23 @@ suspend private fun putItemMultipart(
 
                 if (title != null) writeField("title", title)
                 if (description != null) writeField("description", description)
+                if (deleteAudio) writeField("delete_audio", "true")
 
                 newImageUri?.let { uri ->
                     val name = "image.jpg"
                     val mime = resolver.getType(uri) ?: "image/jpeg"
                     writeString(twoHyphens + boundary + lineEnd)
                     writeString("Content-Disposition: form-data; name=\"image\"; filename=\"$name\"" + lineEnd)
+                    writeString("Content-Type: $mime$lineEnd$lineEnd")
+                    resolver.openInputStream(uri)?.use { it.copyTo(os) }
+                    writeString(lineEnd)
+                }
+
+                newAudioUri?.let { uri ->
+                    val name = "recording.m4a"
+                    val mime = resolver.getType(uri) ?: "audio/m4a"
+                    writeString(twoHyphens + boundary + lineEnd)
+                    writeString("Content-Disposition: form-data; name=\"audio\"; filename=\"$name\"" + lineEnd)
                     writeString("Content-Type: $mime$lineEnd$lineEnd")
                     resolver.openInputStream(uri)?.use { it.copyTo(os) }
                     writeString(lineEnd)
@@ -336,6 +435,8 @@ private fun ItemEditScreen(
     var title by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
     var currentImageUrl by remember { mutableStateOf<String?>(null) }
+    var currentAudioUrl by remember { mutableStateOf<String?>(null) }
+    var deleteAudio by remember { mutableStateOf(false) }
     var newImageUri by remember { mutableStateOf<Uri?>(null) }
 
     val pickImageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -349,6 +450,7 @@ private fun ItemEditScreen(
             title = details.title
             description = details.description ?: ""
             currentImageUrl = details.imageUrl
+            currentAudioUrl = details.audioUrl
         }
         isLoading = false
     }
@@ -446,7 +548,9 @@ private fun ItemEditScreen(
                         itemId = itemId,
                         title = title,
                         description = description,
-                        newImageUri = newImageUri
+                        newImageUri = newImageUri,
+                        newAudioUri = null,
+                        deleteAudio = deleteAudio
                     )
                     if (result.success) {
                         Toast.makeText(activity, "Item updated", Toast.LENGTH_SHORT).show()
@@ -475,12 +579,13 @@ private fun AppNav(
     navController: NavHostController,
     onSignIn: () -> Unit,
     collectionName: String?,
-    collectionIdProvider: () -> String?
+    collectionIdProvider: () -> String?,
+    isAuthenticating: Boolean
 ) {
     MaterialTheme {
         Scaffold { padding ->
             NavHost(navController = navController, startDestination = "login", modifier = Modifier.padding(padding)) {
-                composable("login") { LoginScreen(onSignIn) }
+                composable("login") { LoginScreen(onSignIn, isAuthenticating) }
                 composable("welcome/{first}") { backStack ->
                     val first = backStack.arguments?.getString("first") ?: "there"
                     WelcomeScreen(
@@ -494,9 +599,13 @@ private fun AppNav(
                     ItemFormScreen(
                         onSave = { title, imageUri ->
                             // navigate back on save success from inside ItemFormScreen via callback
+                            android.util.Log.d("Navigation", "onSave called - popping back stack")
                             navController.popBackStack()
                         },
-                        onCancel = { navController.popBackStack() },
+                        onCancel = { 
+                            android.util.Log.d("Navigation", "onCancel called - popping back stack")
+                            navController.popBackStack()
+                        },
                         collectionIdProvider = collectionIdProvider
                     )
                 }
@@ -517,15 +626,21 @@ private fun AppNav(
 }
 
 @Composable
-private fun LoginScreen(onSignIn: () -> Unit) {
+private fun LoginScreen(onSignIn: () -> Unit, isAuthenticating: Boolean) {
     Column(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(text = "Sign in to continue")
-        Button(onClick = onSignIn, modifier = Modifier.padding(top = 16.dp)) {
-            Text("Sign in with Google")
+        if (isAuthenticating) {
+            CircularProgressIndicator(modifier = Modifier.size(48.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(text = "Signing in...")
+        } else {
+            Text(text = "Sign in to continue")
+            Button(onClick = onSignIn, modifier = Modifier.padding(top = 16.dp)) {
+                Text("Sign in with Google")
+            }
         }
     }
 }
@@ -549,9 +664,9 @@ private fun WelcomeScreen(firstName: String, collectionName: String?, onAddItem:
         verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(text = "Welcome $firstName", style = MaterialTheme.typography.headlineMedium)
+        Text(text = "${firstName}'s Legacy", style = MaterialTheme.typography.headlineMedium)
         Button(onClick = onAddItem, modifier = Modifier.padding(top = 16.dp)) {
-            Text("Add Item")
+            Text(if (items.isEmpty()) "Start your legacy!" else "Add Item")
         }
 
         if (isLoading) {
@@ -563,6 +678,12 @@ private fun WelcomeScreen(firstName: String, collectionName: String?, onAddItem:
                 modifier = Modifier.padding(top = 24.dp, bottom = 16.dp)
             )
             ItemsGrid(items = items, onItemClick = onItemClick)
+        } else {
+            Text(
+                text = "You have not loaded any items yet",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 24.dp)
+            )
         }
     }
 }
@@ -574,10 +695,137 @@ private fun ItemFormScreen(
     collectionIdProvider: () -> String?
 ) {
     val activity = LocalContext.current as ComposeMainActivity
-    var title by remember { mutableStateOf("") }
-    var imageUri by remember { mutableStateOf<Uri?>(null) }
+    var title by rememberSaveable { mutableStateOf("processing") }
+    var imageUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var audioUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var isRecording by rememberSaveable { mutableStateOf(false) }
+    var mediaRecorder by remember { mutableStateOf<MediaRecorder?>(null) }
+    var outputPfd by remember { mutableStateOf<ParcelFileDescriptor?>(null) }
+    var showCamera by rememberSaveable { mutableStateOf(false) }
+    var imageCapture by remember { mutableStateOf<androidx.camera.core.ImageCapture?>(null) }
+    
+    android.util.Log.d("ItemFormScreen", "Composing ItemFormScreen")
+    
+    DisposableEffect(Unit) {
+        android.util.Log.d("ItemFormScreen", "ItemFormScreen entered composition")
+        // Keep screen on while creating a new item to avoid the system stopping surfaces on screen-off
+        val window = activity.window
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            android.util.Log.d("ItemFormScreen", "ItemFormScreen leaving composition")
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+    
     val pickImageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         imageUri = uri
+    }
+    // Camera permission for CameraX
+    val requestCameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            showCamera = true
+        } else {
+            Toast.makeText(activity, "Camera permission is required to take photos", Toast.LENGTH_LONG).show()
+        }
+    }
+    // Permission launcher for RECORD_AUDIO
+    val requestRecordPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            android.util.Log.d("AudioRecord", "RECORD_AUDIO permission granted by user")
+            Toast.makeText(activity, "Permission granted. Tap Record to start.", Toast.LENGTH_SHORT).show()
+        } else {
+            android.util.Log.w("AudioRecord", "RECORD_AUDIO permission denied by user")
+            Toast.makeText(activity, "Microphone permission is required to record audio.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // Start recording using MediaRecorder to a MediaStore Uri
+    fun startRecording() {
+        if (isRecording) return
+        try {
+            val hasPermission = ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            if (!hasPermission) {
+                requestRecordPermission.launch(Manifest.permission.RECORD_AUDIO)
+                return
+            }
+
+            // Create a MediaStore entry for the recording
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "recording_" + System.currentTimeMillis() + ".m4a")
+                put(MediaStore.MediaColumns.MIME_TYPE, "audio/mp4")
+                // Let the system place it under Music/ by default; RELATIVE_PATH optional but nicer on API 29+
+                // put(MediaStore.MediaColumns.RELATIVE_PATH, "Music/Shepherd")
+            }
+            val uri = activity.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, contentValues)
+            if (uri == null) {
+                Toast.makeText(activity, "Failed to create audio file", Toast.LENGTH_LONG).show()
+                return
+            }
+            val pfd = activity.contentResolver.openFileDescriptor(uri, "w")
+            if (pfd == null) {
+                Toast.makeText(activity, "Failed to open audio file", Toast.LENGTH_LONG).show()
+                return
+            }
+
+            // Use context-based constructor to avoid deprecation warning
+            val recorder = MediaRecorder(activity)
+            mediaRecorder = recorder
+            outputPfd = pfd
+            audioUri = uri // keep the content Uri for upload later
+
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            recorder.setAudioEncodingBitRate(128_000)
+            recorder.setAudioSamplingRate(44_100)
+            recorder.setOutputFile(pfd.fileDescriptor)
+            recorder.prepare()
+            recorder.start()
+            isRecording = true
+            android.util.Log.d("AudioRecord", "Recording started: $uri")
+        } catch (e: Exception) {
+            android.util.Log.e("AudioRecord", "Failed to start recording", e)
+            Toast.makeText(activity, "Failed to start recording: ${e.message}", Toast.LENGTH_LONG).show()
+            // Clean up
+            try { mediaRecorder?.release() } catch (_: Exception) {}
+            mediaRecorder = null
+            try { outputPfd?.close() } catch (_: Exception) {}
+            outputPfd = null
+            isRecording = false
+        }
+    }
+
+    fun stopRecording() {
+        if (!isRecording) return
+        try {
+            mediaRecorder?.apply {
+                stop()
+                release()
+            }
+            android.util.Log.d("AudioRecord", "Recording stopped: $audioUri")
+        } catch (e: Exception) {
+            android.util.Log.e("AudioRecord", "Error stopping recording", e)
+        } finally {
+            try { outputPfd?.close() } catch (_: Exception) {}
+            outputPfd = null
+            mediaRecorder = null
+            isRecording = false
+        }
+    }
+
+    // Prevent accidental back navigation
+    BackHandler {
+        android.util.Log.d("ItemForm", "Back pressed - showing confirmation")
+        // For now, just call onCancel which will pop the back stack
+        // You could add a confirmation dialog here if needed
+        if (isRecording) {
+            stopRecording()
+        }
+        onCancel()
     }
 
     Column(
@@ -587,21 +835,112 @@ private fun ItemFormScreen(
         verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(text = "New Item", style = MaterialTheme.typography.headlineMedium)
-        OutlinedTextField(
-            value = title,
-            onValueChange = { title = it },
-            label = { Text("Title") },
-            modifier = Modifier
-                .padding(top = 16.dp)
-        )
-        Button(
-            onClick = { pickImageLauncher.launch("image/*") },
-            modifier = Modifier.padding(top = 16.dp)
-        ) { Text(if (imageUri != null) "Change Photo" else "Pick Photo") }
+        // In-app CameraX overlay
+        if (showCamera) {
+            val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+            val context = androidx.compose.ui.platform.LocalContext.current
+            val mainExecutor = androidx.core.content.ContextCompat.getMainExecutor(context)
+            androidx.compose.ui.viewinterop.AndroidView(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                factory = { ctx ->
+                    val previewView = androidx.camera.view.PreviewView(ctx).apply {
+                        layoutParams = android.view.ViewGroup.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                    }
+                    val cameraProviderFuture = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(ctx)
+                    cameraProviderFuture.addListener({
+                        try {
+                            val cameraProvider = cameraProviderFuture.get()
+                            val preview = androidx.camera.core.Preview.Builder().build().apply {
+                                setSurfaceProvider(previewView.surfaceProvider)
+                            }
+                            val imgCapture = androidx.camera.core.ImageCapture.Builder()
+                                .setCaptureMode(androidx.camera.core.ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                                .build()
+                            imageCapture = imgCapture
+                            val selector = androidx.camera.core.CameraSelector.DEFAULT_BACK_CAMERA
+                            cameraProvider.unbindAll()
+                            cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, imgCapture)
+                        } catch (e: Exception) {
+                            android.util.Log.e("CameraX", "Binding failed", e)
+                            Toast.makeText(context, "Camera error", Toast.LENGTH_SHORT).show()
+                            showCamera = false
+                        }
+                    }, mainExecutor)
+                    previewView
+                }
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Button(onClick = { showCamera = false }) { Text("Cancel") }
+                Button(onClick = {
+                    val resolver = activity.contentResolver
+                    val name = "photo_" + System.currentTimeMillis() + ".jpg"
+                    val values = android.content.ContentValues().apply {
+                        put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                        put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                    }
+                    val options = androidx.camera.core.ImageCapture.OutputFileOptions.Builder(
+                        resolver,
+                        android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        values
+                    ).build()
+                    val capture = imageCapture
+                    if (capture == null) {
+                        Toast.makeText(activity, "Camera not ready", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+                    capture.takePicture(options, mainExecutor, object: androidx.camera.core.ImageCapture.OnImageSavedCallback {
+                        override fun onError(exception: androidx.camera.core.ImageCaptureException) {
+                            android.util.Log.e("CameraX", "Capture error", exception)
+                            Toast.makeText(activity, "Failed to capture photo", Toast.LENGTH_SHORT).show()
+                        }
+                        override fun onImageSaved(outputFileResults: androidx.camera.core.ImageCapture.OutputFileResults) {
+                            val savedUri = outputFileResults.savedUri
+                            imageUri = savedUri
+                            showCamera = false
+                            android.util.Log.d("CameraX", "Saved image: $savedUri")
+                        }
+                    })
+                }) { Text("Capture") }
+            }
+        }
+
+        if (!showCamera) {
+            Text(text = "Load new item", style = MaterialTheme.typography.headlineMedium)
+            // Title field removed. Title defaults to "processing" and is not user-editable.
+            Row(
+                modifier = Modifier.padding(top = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(onClick = {
+                    val hasCam = androidx.core.content.ContextCompat.checkSelfPermission(
+                        activity, android.Manifest.permission.CAMERA
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    if (hasCam) {
+                        showCamera = true
+                    } else {
+                        requestCameraPermission.launch(android.Manifest.permission.CAMERA)
+                    }
+                }) {
+                    Text("Take Photo")
+                }
+                Button(onClick = { pickImageLauncher.launch("image/*") }) {
+                    Text(if (imageUri != null) "Change Photo" else "Pick Photo")
+                }
+            }
+        }
         
         // Image preview
-        if (imageUri != null) {
+        if (!showCamera && imageUri != null) {
             Box(
                 modifier = Modifier
                     .padding(top = 16.dp)
@@ -641,20 +980,87 @@ private fun ItemFormScreen(
             }
         }
         
+        // Audio recording section (in-app MediaRecorder)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Button(onClick = {
+                if (isRecording) stopRecording() else startRecording()
+            }) {
+                Text(
+                    when {
+                        isRecording -> "Stop Recording"
+                        audioUri != null -> "Re-record Audio"
+                        else -> "Record Audio"
+                    }
+                )
+            }
+            if (audioUri != null) {
+                Text(text = if (isRecording) "Recording..." else "Audio attached", style = MaterialTheme.typography.bodySmall)
+                IconButton(onClick = { audioUri = null }) {
+                    Icon(imageVector = Icons.Filled.Close, contentDescription = "Remove audio")
+                }
+            }
+        }
+
+        // Audio preview (ExoPlayer) when an audio file is attached and not currently recording
+        if (audioUri != null && !isRecording) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(80.dp)
+            ) {
+                val context = LocalContext.current
+                // Rebuild player when audioUri changes
+                val exoPlayer = remember(audioUri) {
+                    ExoPlayer.Builder(context).build().apply {
+                        try {
+                            setMediaItem(MediaItem.fromUri(audioUri!!))
+                            prepare()
+                        } catch (e: Exception) {
+                            android.util.Log.e("AudioPreview", "Failed to prepare player", e)
+                        }
+                    }
+                }
+                DisposableEffect(exoPlayer) {
+                    onDispose {
+                        try { exoPlayer.release() } catch (_: Exception) {}
+                    }
+                }
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            useController = true
+                            player = exoPlayer
+                            controllerAutoShow = true
+                            setShowRewindButton(true)
+                            setShowFastForwardButton(true)
+                        }
+                    },
+                    update = { view -> view.player = exoPlayer },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        
         Button(
             onClick = {
                 activity.lifecycleScope.launch {
+                    if (isRecording) {
+                        stopRecording()
+                    }
                     val token = activity.getAccessToken()
                     if (token.isNullOrEmpty()) {
                         android.util.Log.w("ItemForm", "Save blocked: Not authenticated")
                         Toast.makeText(activity, "Not authenticated", Toast.LENGTH_SHORT).show()
                         return@launch
                     }
-                    if (title.isBlank()) {
-                        android.util.Log.w("ItemForm", "Save blocked: Title is blank")
-                        Toast.makeText(activity, "Title is required", Toast.LENGTH_SHORT).show()
-                        return@launch
-                    }
+                    // Title defaults to "processing"; no validation required.
                     val collectionId = collectionIdProvider()
                     if (collectionId.isNullOrEmpty()) {
                         android.util.Log.w("ItemForm", "Save blocked: No collectionId available")
@@ -667,6 +1073,7 @@ private fun ItemFormScreen(
                         token = token,
                         title = title,
                         imageUri = imageUri,
+                        audioUri = audioUri,
                         collectionId = collectionId
                     )
                     if (result.success) {
@@ -695,7 +1102,9 @@ data class ItemData(
     val id: String,
     val title: String,
     val description: String?,
-    val imageUrl: String?
+    val imageUrl: String?,
+    val audioUrl: String?,
+    val status: String?
 )
 
 suspend private fun fetchLatestItems(activity: ComposeMainActivity): List<ItemData> {
@@ -726,8 +1135,10 @@ suspend private fun fetchLatestItems(activity: ComposeMainActivity): List<ItemDa
                         val title = obj["title"]?.jsonPrimitive?.contentOrNull ?: "Untitled"
                         val description = obj["description"]?.jsonPrimitive?.contentOrNull
                         val imageUrl = obj["image_url"]?.jsonPrimitive?.contentOrNull
-                        android.util.Log.d("FetchItems", "Item: id=$id, title=$title, imageUrl=$imageUrl")
-                        ItemData(id, title, description, imageUrl)
+                        val audioUrl = obj["audio_url"]?.jsonPrimitive?.contentOrNull
+                        val status = obj["status"]?.jsonPrimitive?.contentOrNull
+                        android.util.Log.d("FetchItems", "Item: id=$id, title=$title, status=$status, imageUrl=$imageUrl, audioUrl=$audioUrl")
+                        ItemData(id, title, description, imageUrl, audioUrl, status)
                     } ?: emptyList()
                     android.util.Log.d("FetchItems", "Loaded ${items.size} items")
                     items
@@ -766,11 +1177,18 @@ private fun ItemThumbnail(item: ItemData, onClick: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Card(
-            modifier = Modifier
+        val cardModifier = if (item.status == "WAITING TRANSCRIPTION") {
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+        } else {
+            Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
                 .clickable { onClick() }
+        }
+        Card(
+            modifier = cardModifier
         ) {
             if (item.imageUrl != null && item.imageUrl.isNotBlank()) {
                 AsyncImage(
@@ -817,6 +1235,7 @@ suspend private fun postItemMultipart(
     token: String,
     title: String,
     imageUri: Uri?,
+    audioUri: Uri?,
     collectionId: String
 ): PostItemResult {
     return withContext(Dispatchers.IO) {
@@ -852,6 +1271,17 @@ suspend private fun postItemMultipart(
                     val mime = resolver.getType(uri) ?: "image/jpeg"
                     writeString(twoHyphens + boundary + lineEnd)
                     writeString("Content-Disposition: form-data; name=\"image\"; filename=\"$name\"" + lineEnd)
+                    writeString("Content-Type: $mime$lineEnd$lineEnd")
+                    resolver.openInputStream(uri)?.use { it.copyTo(os) }
+                    writeString(lineEnd)
+                }
+
+                // optional audio
+                audioUri?.let { uri ->
+                    val name = "recording.m4a"
+                    val mime = resolver.getType(uri) ?: "audio/mp4"
+                    writeString(twoHyphens + boundary + lineEnd)
+                    writeString("Content-Disposition: form-data; name=\"audio\"; filename=\"$name\"" + lineEnd)
                     writeString("Content-Type: $mime$lineEnd$lineEnd")
                     resolver.openInputStream(uri)?.use { it.copyTo(os) }
                     writeString(lineEnd)
