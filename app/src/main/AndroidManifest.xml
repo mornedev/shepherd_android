@@ -15,6 +15,10 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication"
         android:usesCleartextTraffic="true">
+        <!-- Support for 16 KB page sizes (required for Android 15+ devices) -->
+        <property
+            android:name="android.app.16kb_page_size.enabled"
+            android:value="true" />
         <activity
             android:name=".ComposeMainActivity"
             android:exported="true"

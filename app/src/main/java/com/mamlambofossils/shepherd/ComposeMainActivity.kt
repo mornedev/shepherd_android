@@ -7,6 +7,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -31,6 +33,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -56,8 +60,10 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.google.accompanist.swiperefresh.SwipeRefresh
-import com.google.accompanist.swiperefresh.rememberSwipeRefreshState
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -75,6 +81,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import android.content.ClipboardManager
+import android.content.ClipData
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import java.io.ByteArrayOutputStream
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.gotrue.Auth
 import io.github.jan.supabase.gotrue.ExternalAuthAction
@@ -124,6 +135,7 @@ class ComposeMainActivity : ComponentActivity() {
             val nav = rememberNavController()
             var collectionName by rememberSaveable { mutableStateOf<String?>(null) }
             var collectionId by rememberSaveable { mutableStateOf<String?>(null) }
+            var onlyOneCollection by rememberSaveable { mutableStateOf(false) }
             var isAuthenticating by rememberSaveable { mutableStateOf(false) }
             var hasCompletedInitialAuth by rememberSaveable { mutableStateOf(false) }
             AppNav(
@@ -136,6 +148,7 @@ class ComposeMainActivity : ComponentActivity() {
                 },
                 collectionName = collectionName,
                 collectionIdProvider = { collectionId },
+                onlyOneCollection = onlyOneCollection,
                 isAuthenticating = isAuthenticating
             )
 
@@ -175,6 +188,7 @@ class ComposeMainActivity : ComponentActivity() {
                                             if (firstObj != null) {
                                                 collectionName = firstObj["name"]?.jsonPrimitive?.contentOrNull
                                                 collectionId = firstObj["id"]?.jsonPrimitive?.contentOrNull
+                                                onlyOneCollection = (arr?.size == 1)
                                             } else {
                                                 // No collections found; auto-create a default one
                                                 val createUrl = URL(getApiBaseUrl().trimEnd('/') + "/collections")
@@ -196,12 +210,14 @@ class ComposeMainActivity : ComponentActivity() {
                                                         val obj = try { Json.parseToJsonElement(createBody).jsonObject } catch (_: Exception) { null }
                                                         collectionName = obj?.get("name")?.jsonPrimitive?.contentOrNull
                                                         collectionId = obj?.get("id")?.jsonPrimitive?.contentOrNull
+                                                        onlyOneCollection = true
                                                     } else {
                                                         withContext(Dispatchers.Main) {
                                                             Toast.makeText(this@ComposeMainActivity, "Failed to create default collection: $createCode", Toast.LENGTH_LONG).show()
                                                         }
                                                         collectionName = null
                                                         collectionId = null
+                                                        onlyOneCollection = false
                                                     }
                                                 } finally {
                                                     createConn.disconnect()
@@ -210,6 +226,7 @@ class ComposeMainActivity : ComponentActivity() {
                                         } else {
                                             collectionName = null
                                             collectionId = null
+                                            onlyOneCollection = false
                                             withContext(Dispatchers.Main) {
                                                 Toast.makeText(this@ComposeMainActivity, "Failed to load collections: $code", Toast.LENGTH_LONG).show()
                                             }
@@ -308,6 +325,54 @@ class ComposeMainActivity : ComponentActivity() {
     }
 }
 
+// Decode and resize an image from a Uri so the longest side is <= maxSizePx.
+// Returns a JPEG-compressed byte array.
+private fun resizeImageToMax(resolver: ContentResolver, uri: Uri, maxSizePx: Int): ByteArray {
+    // 1) Bounds decode to get dimensions
+    val optsBounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, optsBounds) }
+    val srcW = optsBounds.outWidth
+    val srcH = optsBounds.outHeight
+    if (srcW <= 0 || srcH <= 0) {
+        // Fallback: just stream through
+        return resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+    }
+
+    // 2) Compute inSampleSize to get close to target with less memory
+    var inSample = 1
+    val maxSrc = maxOf(srcW, srcH)
+    if (maxSrc > maxSizePx) {
+        var halfW = srcW / 2
+        var halfH = srcH / 2
+        while ((halfW / inSample) >= maxSizePx || (halfH / inSample) >= maxSizePx) {
+            inSample *= 2
+        }
+    }
+    val opts = BitmapFactory.Options().apply { inSampleSize = inSample }
+    val decoded: Bitmap? = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+    if (decoded == null) {
+        return resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+    }
+
+    // 3) Scale precisely to max dimension if still larger than max
+    val w = decoded.width
+    val h = decoded.height
+    val scale = if (w >= h) maxSizePx.toFloat() / w.toFloat() else maxSizePx.toFloat() / h.toFloat()
+    val finalBitmap = if (maxOf(w, h) > maxSizePx) {
+        val newW = (w * scale).toInt().coerceAtLeast(1)
+        val newH = (h * scale).toInt().coerceAtLeast(1)
+        Bitmap.createScaledBitmap(decoded, newW, newH, true)
+    } else {
+        decoded
+    }
+
+    // 4) Compress to JPEG
+    val out = ByteArrayOutputStream()
+    finalBitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
+    if (finalBitmap !== decoded) decoded.recycle()
+    return out.toByteArray()
+}
+
 // Fetch a single item's details (id, title, description, image_url, audio_url)
 suspend private fun fetchItemDetails(activity: ComposeMainActivity, itemId: String): ItemData? {
     return withContext(Dispatchers.IO) {
@@ -346,6 +411,40 @@ suspend private fun fetchItemDetails(activity: ComposeMainActivity, itemId: Stri
         } catch (e: Exception) {
             android.util.Log.e("FetchItem", "Exception: ${e.message}", e)
             null
+        }
+    }
+}
+
+// Delete an item
+suspend private fun deleteItem(
+    apiBase: String,
+    token: String,
+    itemId: String
+): Boolean {
+    return withContext(Dispatchers.IO) {
+        try {
+            val url = URL(apiBase.trimEnd('/') + "/items/" + itemId)
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "DELETE"
+                setRequestProperty("Authorization", "Bearer $token")
+                connectTimeout = 10000
+                readTimeout = 15000
+            }
+            try {
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    return@withContext true
+                } else {
+                    val body = (conn.errorStream ?: conn.inputStream)?.bufferedReader()?.use { it.readText() } ?: ""
+                    android.util.Log.e("DeleteItem", "HTTP $code body=$body")
+                    return@withContext false
+                }
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("DeleteItem", "Exception: ${e.message}", e)
+            return@withContext false
         }
     }
 }
@@ -390,12 +489,14 @@ suspend private fun putItemMultipart(
                 if (deleteAudio) writeField("delete_audio", "true")
 
                 newImageUri?.let { uri ->
+                    // Resize image so the longest side is 2400px and upload as JPEG
+                    val resized = resizeImageToMax(resolver, uri, 2400)
                     val name = "image.jpg"
-                    val mime = resolver.getType(uri) ?: "image/jpeg"
+                    val mime = "image/jpeg"
                     writeString(twoHyphens + boundary + lineEnd)
                     writeString("Content-Disposition: form-data; name=\"image\"; filename=\"$name\"" + lineEnd)
                     writeString("Content-Type: $mime$lineEnd$lineEnd")
-                    resolver.openInputStream(uri)?.use { it.copyTo(os) }
+                    os.write(resized)
                     writeString(lineEnd)
                 }
 
@@ -441,6 +542,7 @@ private fun ItemEditScreen(
     var currentAudioUrl by remember { mutableStateOf<String?>(null) }
     var deleteAudio by remember { mutableStateOf(false) }
     var newImageUri by remember { mutableStateOf<Uri?>(null) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
 
     val pickImageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         newImageUri = uri
@@ -461,6 +563,7 @@ private fun ItemEditScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally
@@ -570,9 +673,60 @@ private fun ItemEditScreen(
             onClick = onCancel,
             modifier = Modifier.padding(top = 8.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.error
+                containerColor = MaterialTheme.colorScheme.secondary
             )
         ) { Text("Cancel") }
+
+        Button(
+            onClick = { showDeleteDialog = true },
+            modifier = Modifier.padding(top = 16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.error
+            )
+        ) { Text("Delete Item") }
+    }
+
+    // Delete confirmation dialog
+    if (showDeleteDialog) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("Delete Item") },
+            text = { Text("Are you sure you want to delete this item? This action cannot be undone.") },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        showDeleteDialog = false
+                        activity.lifecycleScope.launch {
+                            val token = activity.getAccessToken()
+                            if (token.isNullOrEmpty()) {
+                                Toast.makeText(activity, "Not authenticated", Toast.LENGTH_SHORT).show()
+                                return@launch
+                            }
+                            val success = deleteItem(
+                                apiBase = activity.getApiBaseUrl(),
+                                token = token,
+                                itemId = itemId
+                            )
+                            if (success) {
+                                Toast.makeText(activity, "Item deleted", Toast.LENGTH_SHORT).show()
+                                onSave() // Navigate back
+                            } else {
+                                Toast.makeText(activity, "Failed to delete item", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                ) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = { showDeleteDialog = false }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
@@ -583,6 +737,7 @@ private fun AppNav(
     onSignIn: () -> Unit,
     collectionName: String?,
     collectionIdProvider: () -> String?,
+    onlyOneCollection: Boolean,
     isAuthenticating: Boolean
 ) {
     MaterialTheme {
@@ -594,6 +749,8 @@ private fun AppNav(
                     WelcomeScreen(
                         firstName = first,
                         collectionName = collectionName,
+                        onlyOneCollection = onlyOneCollection,
+                        collectionIdProvider = collectionIdProvider,
                         onAddItem = { navController.navigate("item/new") },
                         onItemClick = { itemId -> navController.navigate("item/edit/$itemId") }
                     )
@@ -648,30 +805,57 @@ private fun LoginScreen(onSignIn: () -> Unit, isAuthenticating: Boolean) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun WelcomeScreen(firstName: String, collectionName: String?, onAddItem: () -> Unit, onItemClick: (String) -> Unit) {
+private fun WelcomeScreen(
+    firstName: String,
+    collectionName: String?,
+    onlyOneCollection: Boolean,
+    collectionIdProvider: () -> String?,
+    onAddItem: () -> Unit,
+    onItemClick: (String) -> Unit
+) {
     val activity = LocalContext.current as ComposeMainActivity
     var items by remember { mutableStateOf<List<ItemData>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
+    var collections by remember { mutableStateOf<List<CollectionData>>(emptyList()) }
+    var isLoadingItems by remember { mutableStateOf(true) }
+    var isLoadingCollections by remember { mutableStateOf(true) }
+    var selectedTabIndex by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
-        isLoading = true
+        isLoadingItems = true
         items = fetchLatestItems(activity)
-        isLoading = false
+        isLoadingItems = false
     }
 
-    val swipeRefreshState = rememberSwipeRefreshState(isRefreshing = isLoading)
+    LaunchedEffect(Unit) {
+        isLoadingCollections = true
+        collections = fetchCollections(activity)
+        isLoadingCollections = false
+    }
 
-    SwipeRefresh(
-        state = swipeRefreshState,
-        onRefresh = {
-            scope.launch {
-                isLoading = true
+    val pullRefreshState = rememberPullToRefreshState()
+
+    if (pullRefreshState.isRefreshing) {
+        LaunchedEffect(true) {
+            if (selectedTabIndex == 0) {
+                isLoadingItems = true
                 items = fetchLatestItems(activity)
-                isLoading = false
+                isLoadingItems = false
+            } else {
+                isLoadingCollections = true
+                collections = fetchCollections(activity)
+                isLoadingCollections = false
             }
+            pullRefreshState.endRefresh()
         }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .nestedScroll(pullRefreshState.nestedScrollConnection)
     ) {
         Column(
             modifier = Modifier
@@ -690,28 +874,129 @@ private fun WelcomeScreen(firstName: String, collectionName: String?, onAddItem:
                         style = MaterialTheme.typography.titleLarge
                     )
                 }
-                Button(onClick = onAddItem) { Text("Add Item") }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (onlyOneCollection) {
+                        Button(onClick = {
+                            scope.launch {
+                                val token = activity.getAccessToken()
+                                val cid = collectionIdProvider()
+                                if (token.isNullOrEmpty() || cid.isNullOrEmpty()) {
+                                    Toast.makeText(activity, "No collection to share", Toast.LENGTH_SHORT).show()
+                                    return@launch
+                                }
+                                withContext(Dispatchers.IO) {
+                                    val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/collections/" + cid + "/publish")
+                                    val conn = (url.openConnection() as HttpURLConnection).apply {
+                                        requestMethod = "POST"
+                                        setRequestProperty("Authorization", "Bearer $token")
+                                        setRequestProperty("Accept", "application/json")
+                                        doOutput = true
+                                        connectTimeout = 10000
+                                        readTimeout = 15000
+                                    }
+                                    try {
+                                        val code = conn.responseCode
+                                        val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                                            ?.bufferedReader()?.use { it.readText() } ?: ""
+                                        android.util.Log.d("PublishCollection", "HTTP $code body=$body")
+                                        if (code in 200..299) {
+                                            val obj = try { Json.parseToJsonElement(body).jsonObject } catch (_: Exception) { null }
+                                            val shareUrl = obj?.get("url")?.jsonPrimitive?.contentOrNull
+                                            withContext(Dispatchers.Main) {
+                                                if (!shareUrl.isNullOrBlank()) {
+                                                    val clipboard = activity.getSystemService(ClipboardManager::class.java)
+                                                    clipboard?.setPrimaryClip(ClipData.newPlainText("Collection Link", shareUrl))
+                                                    Toast.makeText(activity, "Share link copied", Toast.LENGTH_SHORT).show()
+                                                } else {
+                                                    Toast.makeText(activity, "Failed to get link", Toast.LENGTH_LONG).show()
+                                                }
+                                            }
+                                        } else {
+                                            withContext(Dispatchers.Main) {
+                                                Toast.makeText(activity, "Failed to publish ($code)", Toast.LENGTH_LONG).show()
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("PublishCollection", "Exception: ${e.message}", e)
+                                        withContext(Dispatchers.Main) {
+                                            Toast.makeText(activity, "Error publishing link", Toast.LENGTH_LONG).show()
+                                        }
+                                    } finally {
+                                        conn.disconnect()
+                                    }
+                                }
+                            }
+                        }) { Text("Share") }
+                    }
+                    Button(onClick = onAddItem) { Text("Add Item") }
+                }
             }
 
-            if (isLoading && items.isEmpty()) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                    CircularProgressIndicator()
-                }
-            } else if (items.isNotEmpty()) {
-                Text(
-                    text = "Recent Items",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(top = 24.dp, bottom = 16.dp)
+            // Tabs
+            TabRow(
+                selectedTabIndex = selectedTabIndex,
+                modifier = Modifier.padding(top = 16.dp)
+            ) {
+                Tab(
+                    selected = selectedTabIndex == 0,
+                    onClick = { selectedTabIndex = 0 },
+                    text = { Text("Recent Items") }
                 )
-                ItemsGrid(items = items, onItemClick = onItemClick)
-            } else {
-                Text(
-                    text = "You have not loaded any items yet",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 24.dp)
+                Tab(
+                    selected = selectedTabIndex == 1,
+                    onClick = { selectedTabIndex = 1 },
+                    text = { Text("Collections") }
                 )
             }
+
+            // Tab content
+            when (selectedTabIndex) {
+                0 -> {
+                    if (isLoadingItems && items.isEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 24.dp),
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            CircularProgressIndicator()
+                        }
+                    } else if (items.isNotEmpty()) {
+                        ItemsGrid(items = items, onItemClick = onItemClick)
+                    } else {
+                        Text(
+                            text = "You have not loaded any items yet",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(top = 24.dp)
+                        )
+                    }
+                }
+                1 -> {
+                    if (isLoadingCollections && collections.isEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 24.dp),
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            CircularProgressIndicator()
+                        }
+                    } else if (collections.isNotEmpty()) {
+                        CollectionsList(collections = collections)
+                    } else {
+                        Text(
+                            text = "No collections found",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(top = 24.dp)
+                        )
+                    }
+                }
+            }
         }
+        PullToRefreshContainer(
+            state = pullRefreshState,
+            modifier = Modifier.align(Alignment.TopCenter)
+        )
     }
 }
 
@@ -1134,6 +1419,11 @@ data class ItemData(
     val status: String?
 )
 
+data class CollectionData(
+    val id: String,
+    val name: String
+)
+
 suspend private fun fetchLatestItems(activity: ComposeMainActivity): List<ItemData> {
     return withContext(Dispatchers.IO) {
         try {
@@ -1183,6 +1473,50 @@ suspend private fun fetchLatestItems(activity: ComposeMainActivity): List<ItemDa
     }
 }
 
+suspend private fun fetchCollections(activity: ComposeMainActivity): List<CollectionData> {
+    return withContext(Dispatchers.IO) {
+        try {
+            val token = activity.getAccessToken()
+            if (token.isNullOrEmpty()) {
+                android.util.Log.w("FetchCollections", "No token available")
+                return@withContext emptyList()
+            }
+            val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/collections")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("Authorization", "Bearer $token")
+                setRequestProperty("Accept", "application/json")
+                connectTimeout = 10000
+                readTimeout = 15000
+            }
+            try {
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    val body = conn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
+                    android.util.Log.d("FetchCollections", "Response body: $body")
+                    val arr = try { Json.parseToJsonElement(body).jsonArray } catch (_: Exception) { null }
+                    val collections = arr?.mapNotNull { element ->
+                        val obj = element.jsonObject
+                        val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                        val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: "Untitled Collection"
+                        CollectionData(id, name)
+                    } ?: emptyList()
+                    android.util.Log.d("FetchCollections", "Loaded ${collections.size} collections")
+                    collections
+                } else {
+                    android.util.Log.e("FetchCollections", "HTTP $code")
+                    emptyList()
+                }
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("FetchCollections", "Exception: ${e.message}", e)
+            emptyList()
+        }
+    }
+}
+
 @Composable
 private fun ItemsGrid(items: List<ItemData>, onItemClick: (String) -> Unit) {
     LazyVerticalGrid(
@@ -1194,6 +1528,37 @@ private fun ItemsGrid(items: List<ItemData>, onItemClick: (String) -> Unit) {
     ) {
         items(items) { item ->
             ItemThumbnail(item = item, onClick = { onItemClick(item.id) })
+        }
+    }
+}
+
+@Composable
+private fun CollectionsList(collections: List<CollectionData>) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        collections.forEach { collection ->
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = collection.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
         }
     }
 }
@@ -1295,11 +1660,13 @@ suspend private fun postItemMultipart(
                 // optional image
                 imageUri?.let { uri ->
                     val name = "image.jpg"
-                    val mime = resolver.getType(uri) ?: "image/jpeg"
+                    val mime = "image/jpeg"
+                    // Resize before upload
+                    val resized = resizeImageToMax(resolver, uri, 2400)
                     writeString(twoHyphens + boundary + lineEnd)
                     writeString("Content-Disposition: form-data; name=\"image\"; filename=\"$name\"" + lineEnd)
                     writeString("Content-Type: $mime$lineEnd$lineEnd")
-                    resolver.openInputStream(uri)?.use { it.copyTo(os) }
+                    os.write(resized)
                     writeString(lineEnd)
                 }
 
