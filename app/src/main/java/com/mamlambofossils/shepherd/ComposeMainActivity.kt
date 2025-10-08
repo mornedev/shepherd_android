@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -38,8 +39,15 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Check
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import coil.ImageLoader
+import coil.disk.DiskCache
+import coil.memory.MemoryCache
+import coil.request.CachePolicy
+import coil.util.DebugLogger
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -106,6 +114,24 @@ import java.net.URL
 
 class ComposeMainActivity : ComponentActivity() {
 
+    // Configure Coil ImageLoader with aggressive caching
+    internal val imageLoader by lazy {
+        ImageLoader.Builder(this)
+            .memoryCache {
+                MemoryCache.Builder(this)
+                    .maxSizePercent(0.25) // Use 25% of app's available memory
+                    .build()
+            }
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(cacheDir.resolve("image_cache"))
+                    .maxSizeBytes(100 * 1024 * 1024) // 100 MB disk cache
+                    .build()
+            }
+            .respectCacheHeaders(false) // Ignore server cache headers, cache everything
+            .build()
+    }
+
     private val supabase by lazy {
         createSupabaseClient(
             supabaseUrl = "https://umvlwoplsdunsvhdqzta.supabase.co",
@@ -115,6 +141,9 @@ class ComposeMainActivity : ComponentActivity() {
                 host = "auth"
                 scheme = "legacyshepherd"
                 defaultExternalAuthAction = ExternalAuthAction.CustomTabs()
+                // Enable auto-refresh (session persistence is enabled by default in supabase-kt)
+                autoSaveToStorage = true    // saves session locally
+                autoLoadFromStorage = true  // loads session on startup
             }
         }
     }
@@ -153,7 +182,9 @@ class ComposeMainActivity : ComponentActivity() {
             )
 
             // Observe session and navigate
-            LaunchedEffect(Unit) {
+            LaunchedEffect(nav) {
+                // Wait for NavController to be ready
+                kotlinx.coroutines.delay(100)
                 supabase.auth.sessionStatus.collect { status ->
                     android.util.Log.d("AuthFlow", "Session status changed: $status, hasCompletedInitialAuth=$hasCompletedInitialAuth")
                     if (status is SessionStatus.Authenticated && !hasCompletedInitialAuth) {
@@ -605,11 +636,15 @@ private fun ItemEditScreen(
                         .height(200.dp)
                 ) {
                     val modelData: Any? = newImageUri ?: currentImageUrl
+                    val activity = LocalContext.current as ComposeMainActivity
                     AsyncImage(
                         model = ImageRequest.Builder(LocalContext.current)
                             .data(modelData)
                             .crossfade(true)
+                            .memoryCachePolicy(CachePolicy.ENABLED)
+                            .diskCachePolicy(CachePolicy.ENABLED)
                             .build(),
+                        imageLoader = activity.imageLoader,
                         contentDescription = "Item image",
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop
@@ -752,6 +787,15 @@ private fun AppNav(
                         onlyOneCollection = onlyOneCollection,
                         collectionIdProvider = collectionIdProvider,
                         onAddItem = { navController.navigate("item/new") },
+                        onItemClick = { itemId -> navController.navigate("item/edit/$itemId") },
+                        onCollectionClick = { collectionId -> navController.navigate("collection/$collectionId") }
+                    )
+                }
+                composable("collection/{collectionId}") { backStack ->
+                    val collectionId = backStack.arguments?.getString("collectionId") ?: ""
+                    CollectionGalleryScreen(
+                        collectionId = collectionId,
+                        onBack = { navController.popBackStack() },
                         onItemClick = { itemId -> navController.navigate("item/edit/$itemId") }
                     )
                 }
@@ -813,7 +857,8 @@ private fun WelcomeScreen(
     onlyOneCollection: Boolean,
     collectionIdProvider: () -> String?,
     onAddItem: () -> Unit,
-    onItemClick: (String) -> Unit
+    onItemClick: (String) -> Unit,
+    onCollectionClick: (String) -> Unit
 ) {
     val activity = LocalContext.current as ComposeMainActivity
     var items by remember { mutableStateOf<List<ItemData>>(emptyList()) }
@@ -832,7 +877,18 @@ private fun WelcomeScreen(
     LaunchedEffect(Unit) {
         isLoadingCollections = true
         collections = fetchCollections(activity)
+        android.util.Log.d("WelcomeScreen", "Collections loaded: ${collections.size}")
         isLoadingCollections = false
+    }
+
+    // Reload collections when switching to Collections tab
+    LaunchedEffect(selectedTabIndex) {
+        if (selectedTabIndex == 1 && collections.isEmpty()) {
+            isLoadingCollections = true
+            collections = fetchCollections(activity)
+            android.util.Log.d("WelcomeScreen", "Collections reloaded on tab switch: ${collections.size}")
+            isLoadingCollections = false
+        }
     }
 
     val pullRefreshState = rememberPullToRefreshState()
@@ -866,70 +922,10 @@ private fun WelcomeScreen(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Welcome, $firstName",
-                        style = MaterialTheme.typography.titleLarge
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (onlyOneCollection) {
-                        Button(onClick = {
-                            scope.launch {
-                                val token = activity.getAccessToken()
-                                val cid = collectionIdProvider()
-                                if (token.isNullOrEmpty() || cid.isNullOrEmpty()) {
-                                    Toast.makeText(activity, "No collection to share", Toast.LENGTH_SHORT).show()
-                                    return@launch
-                                }
-                                withContext(Dispatchers.IO) {
-                                    val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/collections/" + cid + "/publish")
-                                    val conn = (url.openConnection() as HttpURLConnection).apply {
-                                        requestMethod = "POST"
-                                        setRequestProperty("Authorization", "Bearer $token")
-                                        setRequestProperty("Accept", "application/json")
-                                        doOutput = true
-                                        connectTimeout = 10000
-                                        readTimeout = 15000
-                                    }
-                                    try {
-                                        val code = conn.responseCode
-                                        val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
-                                            ?.bufferedReader()?.use { it.readText() } ?: ""
-                                        android.util.Log.d("PublishCollection", "HTTP $code body=$body")
-                                        if (code in 200..299) {
-                                            val obj = try { Json.parseToJsonElement(body).jsonObject } catch (_: Exception) { null }
-                                            val shareUrl = obj?.get("url")?.jsonPrimitive?.contentOrNull
-                                            withContext(Dispatchers.Main) {
-                                                if (!shareUrl.isNullOrBlank()) {
-                                                    val clipboard = activity.getSystemService(ClipboardManager::class.java)
-                                                    clipboard?.setPrimaryClip(ClipData.newPlainText("Collection Link", shareUrl))
-                                                    Toast.makeText(activity, "Share link copied", Toast.LENGTH_SHORT).show()
-                                                } else {
-                                                    Toast.makeText(activity, "Failed to get link", Toast.LENGTH_LONG).show()
-                                                }
-                                            }
-                                        } else {
-                                            withContext(Dispatchers.Main) {
-                                                Toast.makeText(activity, "Failed to publish ($code)", Toast.LENGTH_LONG).show()
-                                            }
-                                        }
-                                    } catch (e: Exception) {
-                                        android.util.Log.e("PublishCollection", "Exception: ${e.message}", e)
-                                        withContext(Dispatchers.Main) {
-                                            Toast.makeText(activity, "Error publishing link", Toast.LENGTH_LONG).show()
-                                        }
-                                    } finally {
-                                        conn.disconnect()
-                                    }
-                                }
-                            }
-                        }) { Text("Share") }
-                    }
-                    Button(onClick = onAddItem) { Text("Add Item") }
-                }
+                Button(onClick = onAddItem) { Text("Add Item") }
             }
 
             // Tabs
@@ -982,7 +978,7 @@ private fun WelcomeScreen(
                             CircularProgressIndicator()
                         }
                     } else if (collections.isNotEmpty()) {
-                        CollectionsList(collections = collections)
+                        CollectionsList(collections = collections, onCollectionClick = onCollectionClick)
                     } else {
                         Text(
                             text = "No collections found",
@@ -1000,6 +996,7 @@ private fun WelcomeScreen(
     }
 }
 
+@OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 private fun ItemFormScreen(
     onSave: (String, Uri?) -> Unit,
@@ -1015,6 +1012,8 @@ private fun ItemFormScreen(
     var outputPfd by remember { mutableStateOf<ParcelFileDescriptor?>(null) }
     var showCamera by rememberSaveable { mutableStateOf(false) }
     var imageCapture by remember { mutableStateOf<androidx.camera.core.ImageCapture?>(null) }
+    var amplitudes by remember { mutableStateOf(listOf<Float>()) }
+    val scope = rememberCoroutineScope()
     
     android.util.Log.d("ItemFormScreen", "Composing ItemFormScreen")
     
@@ -1098,6 +1097,22 @@ private fun ItemFormScreen(
             recorder.prepare()
             recorder.start()
             isRecording = true
+            amplitudes = listOf() // Reset amplitudes
+            
+            // Start amplitude polling
+            scope.launch {
+                while (isRecording) {
+                    try {
+                        val amplitude = recorder.maxAmplitude
+                        val normalizedAmplitude = (amplitude / 32767f).coerceIn(0f, 1f)
+                        amplitudes = (amplitudes + normalizedAmplitude).takeLast(50) // Keep last 50 samples
+                    } catch (e: Exception) {
+                        android.util.Log.e("AudioRecord", "Error reading amplitude", e)
+                    }
+                    kotlinx.coroutines.delay(50) // Poll every 50ms
+                }
+            }
+            
             android.util.Log.d("AudioRecord", "Recording started: $uri")
         } catch (e: Exception) {
             android.util.Log.e("AudioRecord", "Failed to start recording", e)
@@ -1263,14 +1278,18 @@ private fun ItemFormScreen(
                         .fillMaxWidth()
                         .height(200.dp)
                 ) {
+                    val activity = LocalContext.current as ComposeMainActivity
                     AsyncImage(
                         model = ImageRequest.Builder(LocalContext.current)
                             .data(imageUri)
                             .crossfade(true)
+                            .memoryCachePolicy(CachePolicy.ENABLED)
+                            .diskCachePolicy(CachePolicy.ENABLED)
                             .build(),
-                        contentDescription = "Selected photo preview",
+                        imageLoader = activity.imageLoader,
+                        contentDescription = "Item image",
                         modifier = Modifier.fillMaxSize(),
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                        contentScale = ContentScale.Crop
                     )
                 }
                 // Remove button
@@ -1315,6 +1334,43 @@ private fun ItemFormScreen(
                 Text(text = if (isRecording) "Recording..." else "Audio attached", style = MaterialTheme.typography.bodySmall)
                 IconButton(onClick = { audioUri = null }) {
                     Icon(imageVector = Icons.Filled.Close, contentDescription = "Remove audio")
+                }
+            }
+        }
+
+        // Waveform visualization during recording
+        if (isRecording) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(80.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val barWidth = 4.dp.toPx()
+                        val barSpacing = 2.dp.toPx()
+                        val totalBarWidth = barWidth + barSpacing
+                        val maxBars = (size.width / totalBarWidth).toInt()
+                        val displayAmplitudes = amplitudes.takeLast(maxBars)
+                        
+                        displayAmplitudes.forEachIndexed { index, amplitude ->
+                            val barHeight = (amplitude * size.height * 0.8f).coerceAtLeast(4.dp.toPx())
+                            val x = size.width - (displayAmplitudes.size - index) * totalBarWidth
+                            val y = (size.height - barHeight) / 2
+                            
+                            drawRect(
+                                color = androidx.compose.ui.graphics.Color(0xFF2196F3),
+                                topLeft = androidx.compose.ui.geometry.Offset(x, y),
+                                size = androidx.compose.ui.geometry.Size(barWidth, barHeight)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1421,7 +1477,8 @@ data class ItemData(
 
 data class CollectionData(
     val id: String,
-    val name: String
+    val name: String,
+    val thumbnailUrl: String?
 )
 
 suspend private fun fetchLatestItems(activity: ComposeMainActivity): List<ItemData> {
@@ -1499,7 +1556,8 @@ suspend private fun fetchCollections(activity: ComposeMainActivity): List<Collec
                         val obj = element.jsonObject
                         val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
                         val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: "Untitled Collection"
-                        CollectionData(id, name)
+                        val thumbnailUrl = obj["thumbnail_url"]?.jsonPrimitive?.contentOrNull
+                        CollectionData(id, name, thumbnailUrl)
                     } ?: emptyList()
                     android.util.Log.d("FetchCollections", "Loaded ${collections.size} collections")
                     collections
@@ -1514,6 +1572,328 @@ suspend private fun fetchCollections(activity: ComposeMainActivity): List<Collec
             android.util.Log.e("FetchCollections", "Exception: ${e.message}", e)
             emptyList()
         }
+    }
+}
+
+suspend private fun fetchCollectionItems(activity: ComposeMainActivity, collectionId: String): List<ItemData> {
+    return withContext(Dispatchers.IO) {
+        try {
+            val token = activity.getAccessToken()
+            if (token.isNullOrEmpty()) {
+                android.util.Log.w("FetchCollectionItems", "No token available")
+                return@withContext emptyList()
+            }
+            val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/items?collection_id=$collectionId")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("Authorization", "Bearer $token")
+                setRequestProperty("Accept", "application/json")
+                connectTimeout = 10000
+                readTimeout = 15000
+            }
+            try {
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    val body = conn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
+                    android.util.Log.d("FetchCollectionItems", "Response body: $body")
+                    val arr = try { Json.parseToJsonElement(body).jsonArray } catch (_: Exception) { null }
+                    val items = arr?.mapNotNull { element ->
+                        val obj = element.jsonObject
+                        val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                        val title = obj["title"]?.jsonPrimitive?.contentOrNull ?: "Untitled"
+                        val description = obj["description"]?.jsonPrimitive?.contentOrNull
+                        val imageUrl = obj["image_url"]?.jsonPrimitive?.contentOrNull
+                        val audioUrl = obj["audio_url"]?.jsonPrimitive?.contentOrNull
+                        val status = obj["status"]?.jsonPrimitive?.contentOrNull
+                        ItemData(id, title, description, imageUrl, audioUrl, status)
+                    } ?: emptyList()
+                    android.util.Log.d("FetchCollectionItems", "Loaded ${items.size} items for collection $collectionId")
+                    items
+                } else {
+                    android.util.Log.e("FetchCollectionItems", "HTTP $code")
+                    emptyList()
+                }
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("FetchCollectionItems", "Exception: ${e.message}", e)
+            emptyList()
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CollectionGalleryScreen(
+    collectionId: String,
+    onBack: () -> Unit,
+    onItemClick: (String) -> Unit
+) {
+    val activity = LocalContext.current as ComposeMainActivity
+    var items by remember { mutableStateOf<List<ItemData>>(emptyList()) }
+    var collectionName by remember { mutableStateOf<String?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+    var isEditingName by remember { mutableStateOf(false) }
+    var editedName by remember { mutableStateOf("") }
+
+    LaunchedEffect(collectionId) {
+        isLoading = true
+        // Fetch collection details
+        withContext(Dispatchers.IO) {
+            try {
+                val token = activity.getAccessToken()
+                if (!token.isNullOrEmpty()) {
+                    val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/collections/$collectionId")
+                    val conn = (url.openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        setRequestProperty("Authorization", "Bearer $token")
+                        setRequestProperty("Accept", "application/json")
+                        connectTimeout = 10000
+                        readTimeout = 15000
+                    }
+                    try {
+                        val code = conn.responseCode
+                        if (code in 200..299) {
+                            val body = conn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
+                            val obj = try { Json.parseToJsonElement(body).jsonObject } catch (_: Exception) { null }
+                            collectionName = obj?.get("name")?.jsonPrimitive?.contentOrNull
+                        }
+                    } finally {
+                        conn.disconnect()
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("CollectionGallery", "Failed to fetch collection: ${e.message}", e)
+            }
+        }
+        // Fetch items
+        items = fetchCollectionItems(activity, collectionId)
+        isLoading = false
+    }
+
+    val pullRefreshState = rememberPullToRefreshState()
+
+    if (pullRefreshState.isRefreshing) {
+        LaunchedEffect(true) {
+            isLoading = true
+            items = fetchCollectionItems(activity, collectionId)
+            isLoading = false
+            pullRefreshState.endRefresh()
+        }
+    }
+
+    BackHandler { onBack() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .nestedScroll(pullRefreshState.nestedScrollConnection)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            // Header with back button
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                androidx.compose.material3.TextButton(onClick = onBack) {
+                    Text("< Back")
+                }
+                if (isEditingName) {
+                    OutlinedTextField(
+                        value = editedName,
+                        onValueChange = { editedName = it },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.titleLarge
+                    )
+                    // Green check to save
+                    IconButton(onClick = {
+                        // Save the edited name
+                        if (editedName.isNotBlank()) {
+                            activity.lifecycleScope.launch {
+                                val token = activity.getAccessToken()
+                                if (!token.isNullOrEmpty()) {
+                                    withContext(Dispatchers.IO) {
+                                        try {
+                                            val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/collections/$collectionId")
+                                            val conn = (url.openConnection() as HttpURLConnection).apply {
+                                                requestMethod = "PUT"
+                                                setRequestProperty("Authorization", "Bearer $token")
+                                                setRequestProperty("Content-Type", "application/json")
+                                                setRequestProperty("Accept", "application/json")
+                                                doOutput = true
+                                            }
+                                            try {
+                                                val payload = "{\"name\":\"${editedName.replace("\"", "\\\\\"")}\"}"
+                                                conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+                                                val code = conn.responseCode
+                                                if (code in 200..299) {
+                                                    withContext(Dispatchers.Main) {
+                                                        collectionName = editedName
+                                                        isEditingName = false
+                                                        Toast.makeText(activity, "Collection name updated", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                } else {
+                                                    withContext(Dispatchers.Main) {
+                                                        Toast.makeText(activity, "Failed to update name", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            } finally {
+                                                conn.disconnect()
+                                            }
+                                        } catch (e: Exception) {
+                                            android.util.Log.e("CollectionGallery", "Failed to update name: ${e.message}", e)
+                                            withContext(Dispatchers.Main) {
+                                                Toast.makeText(activity, "Error updating name", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }) {
+                        Icon(
+                            imageVector = Icons.Filled.Check,
+                            contentDescription = "Save",
+                            tint = Color.Green
+                        )
+                    }
+                    // Red cross to cancel
+                    IconButton(onClick = {
+                        isEditingName = false
+                        editedName = collectionName ?: ""
+                    }) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Cancel",
+                            tint = Color.Red
+                        )
+                    }
+                } else {
+                    Text(
+                        text = collectionName ?: "Collection",
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = {
+                        editedName = collectionName ?: ""
+                        isEditingName = true
+                    }) {
+                        Icon(
+                            imageVector = Icons.Filled.Edit,
+                            contentDescription = "Edit name"
+                        )
+                    }
+                }
+            }
+
+            // Share button
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Button(onClick = {
+                    activity.lifecycleScope.launch {
+                        val token = activity.getAccessToken()
+                        if (token.isNullOrEmpty()) {
+                            Toast.makeText(activity, "Not authenticated", Toast.LENGTH_SHORT).show()
+                            return@launch
+                        }
+                        withContext(Dispatchers.IO) {
+                            try {
+                                val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/collections/$collectionId/publish")
+                                val conn = (url.openConnection() as HttpURLConnection).apply {
+                                    requestMethod = "POST"
+                                    setRequestProperty("Authorization", "Bearer $token")
+                                    setRequestProperty("Accept", "application/json")
+                                    doOutput = true
+                                    connectTimeout = 10000
+                                    readTimeout = 15000
+                                }
+                                try {
+                                    val code = conn.responseCode
+                                    val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                                        ?.bufferedReader()?.use { it.readText() } ?: ""
+                                    android.util.Log.d("PublishCollection", "HTTP $code body=$body")
+                                    if (code in 200..299) {
+                                        val obj = try { Json.parseToJsonElement(body).jsonObject } catch (_: Exception) { null }
+                                        val shareUrl = obj?.get("url")?.jsonPrimitive?.contentOrNull
+                                        withContext(Dispatchers.Main) {
+                                            if (!shareUrl.isNullOrBlank()) {
+                                                val clipboard = activity.getSystemService(ClipboardManager::class.java)
+                                                clipboard?.setPrimaryClip(ClipData.newPlainText("Collection Link", shareUrl))
+                                                Toast.makeText(activity, "Share link copied", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(activity, "Failed to get link", Toast.LENGTH_LONG).show()
+                                            }
+                                        }
+                                    } else {
+                                        withContext(Dispatchers.Main) {
+                                            Toast.makeText(activity, "Failed to publish ($code)", Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.e("PublishCollection", "Exception: ${e.message}", e)
+                                    withContext(Dispatchers.Main) {
+                                        Toast.makeText(activity, "Error publishing link", Toast.LENGTH_LONG).show()
+                                    }
+                                } finally {
+                                    conn.disconnect()
+                                }
+                            } catch (e: Exception) {
+                                android.util.Log.e("PublishCollection", "Exception: ${e.message}", e)
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(activity, "Error publishing link", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }
+                    }
+                }) {
+                    Text("Share Collection")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Gallery grid with 2 columns
+            if (isLoading && items.isEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    CircularProgressIndicator()
+                }
+            } else if (items.isNotEmpty()) {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    contentPadding = PaddingValues(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    items(items) { item ->
+                        ItemThumbnail(item = item, onClick = { onItemClick(item.id) })
+                    }
+                }
+            } else {
+                Text(
+                    text = "No items in this collection yet",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 24.dp)
+                )
+            }
+        }
+        PullToRefreshContainer(
+            state = pullRefreshState,
+            modifier = Modifier.align(Alignment.TopCenter)
+        )
     }
 }
 
@@ -1533,7 +1913,7 @@ private fun ItemsGrid(items: List<ItemData>, onItemClick: (String) -> Unit) {
 }
 
 @Composable
-private fun CollectionsList(collections: List<CollectionData>) {
+private fun CollectionsList(collections: List<CollectionData>, onCollectionClick: (String) -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1545,13 +1925,50 @@ private fun CollectionsList(collections: List<CollectionData>) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp)
+                    .clickable { onCollectionClick(collection.id) }
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    // Thumbnail
+                    Card(
+                        modifier = Modifier
+                            .size(60.dp)
+                    ) {
+                        if (collection.thumbnailUrl != null) {
+                            val activity = LocalContext.current as ComposeMainActivity
+                            AsyncImage(
+                                model = ImageRequest.Builder(LocalContext.current)
+                                    .data(collection.thumbnailUrl)
+                                    .crossfade(true)
+                                    .memoryCachePolicy(CachePolicy.ENABLED)
+                                    .diskCachePolicy(CachePolicy.ENABLED)
+                                    .build(),
+                                imageLoader = activity.imageLoader,
+                                contentDescription = "${collection.name} thumbnail",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = collection.name.take(1).uppercase(),
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
+                    
                     Text(
                         text = collection.name,
                         style = MaterialTheme.typography.bodyLarge,
@@ -1583,10 +2000,13 @@ private fun ItemThumbnail(item: ItemData, onClick: () -> Unit) {
             modifier = cardModifier
         ) {
             if (item.imageUrl != null && item.imageUrl.isNotBlank()) {
+                val activity = LocalContext.current as ComposeMainActivity
                 AsyncImage(
                     model = ImageRequest.Builder(LocalContext.current)
                         .data(item.imageUrl)
                         .crossfade(true)
+                        .memoryCachePolicy(CachePolicy.ENABLED)
+                        .diskCachePolicy(CachePolicy.ENABLED)
                         .listener(
                             onError = { _, result ->
                                 android.util.Log.e("ItemThumbnail", "Failed to load image: ${item.imageUrl}, error: ${result.throwable.message}")
@@ -1596,6 +2016,7 @@ private fun ItemThumbnail(item: ItemData, onClick: () -> Unit) {
                             }
                         )
                         .build(),
+                    imageLoader = activity.imageLoader,
                     contentDescription = item.title,
                     modifier = Modifier.fillMaxSize(),
                     error = androidx.compose.ui.graphics.painter.ColorPainter(Color.LightGray)

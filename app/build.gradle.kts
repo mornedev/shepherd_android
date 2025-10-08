@@ -25,6 +25,20 @@ android {
 
         // Make API base URL available in BuildConfig
         buildConfigField("String", "API_BASE_URL", "\"${apiBaseUrl}\"")
+
+        // Align native libraries to 16 KB page boundaries for Android 15+ compatibility
+        ndk {
+            //noinspection ChromeOsAbiSupport
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Use legacy packaging to extract native libs at install time
+            // This allows the system to handle alignment properly
+            useLegacyPackaging = true
+        }
     }
 
     buildTypes {
@@ -84,11 +98,11 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
     implementation("org.slf4j:slf4j-android:1.7.36")
-    // CameraX for in-app camera
-    implementation("androidx.camera:camera-core:1.3.4")
-    implementation("androidx.camera:camera-camera2:1.3.4")
-    implementation("androidx.camera:camera-lifecycle:1.3.4")
-    implementation("androidx.camera:camera-view:1.3.4")
+    // CameraX for in-app camera (1.4.0+ has better 16KB support)
+    implementation("androidx.camera:camera-core:1.4.0")
+    implementation("androidx.camera:camera-camera2:1.4.0")
+    implementation("androidx.camera:camera-lifecycle:1.4.0")
+    implementation("androidx.camera:camera-view:1.4.0")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

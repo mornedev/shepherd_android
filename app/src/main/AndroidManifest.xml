@@ -14,10 +14,16 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="true"
+        android:extractNativeLibs="true">
         <!-- Support for 16 KB page sizes (required for Android 15+ devices) -->
+        <!-- Note: CameraX native libraries are extracted at install time (extractNativeLibs=true) -->
+        <!-- to ensure proper alignment on 16KB devices -->
         <property
             android:name="android.app.16kb_page_size.enabled"
+            android:value="true" />
+        <property
+            android:name="android.app.16kb_page_size.compatible"
             android:value="true" />
         <activity
             android:name=".ComposeMainActivity"
