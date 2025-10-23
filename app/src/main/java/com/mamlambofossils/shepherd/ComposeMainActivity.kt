@@ -119,16 +119,17 @@ class ComposeMainActivity : ComponentActivity() {
         ImageLoader.Builder(this)
             .memoryCache {
                 MemoryCache.Builder(this)
-                    .maxSizePercent(0.25) // Use 25% of app's available memory
+                    .maxSizePercent(0.30) // Use 30% of app's available memory for better caching
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache"))
-                    .maxSizeBytes(100 * 1024 * 1024) // 100 MB disk cache
+                    .maxSizeBytes(200 * 1024 * 1024) // 200 MB disk cache for more images
                     .build()
             }
             .respectCacheHeaders(false) // Ignore server cache headers, cache everything
+            .crossfade(true) // Enable crossfade by default
             .build()
     }
 
@@ -596,13 +597,25 @@ private fun ItemEditScreen(
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.Top,
-        horizontalAlignment = Alignment.CenterHorizontally
+        verticalArrangement = Arrangement.Top
     ) {
-        Text(text = "Edit Item", style = MaterialTheme.typography.headlineMedium)
+        // Header with back button
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            androidx.compose.material3.TextButton(onClick = onCancel) {
+                Text("< Back")
+            }
+            Text(
+                text = "Edit Item",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.weight(1f)
+            )
+        }
 
         if (isLoading) {
-            Text("Loading...")
+            Text("Loading...", modifier = Modifier.padding(top = 16.dp))
             return@Column
         }
 
@@ -610,13 +623,17 @@ private fun ItemEditScreen(
             value = title,
             onValueChange = { title = it },
             label = { Text("Title") },
-            modifier = Modifier.padding(top = 16.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp)
         )
         OutlinedTextField(
             value = description,
             onValueChange = { description = it },
             label = { Text("Description") },
-            modifier = Modifier.padding(top = 16.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp)
         )
 
         Button(
@@ -796,7 +813,8 @@ private fun AppNav(
                     CollectionGalleryScreen(
                         collectionId = collectionId,
                         onBack = { navController.popBackStack() },
-                        onItemClick = { itemId -> navController.navigate("item/edit/$itemId") }
+                        onItemClick = { itemId -> navController.navigate("item/edit/$itemId") },
+                        onAddItem = { navController.navigate("item/new/$collectionId") }
                     )
                 }
                 composable("item/new") {
@@ -810,7 +828,23 @@ private fun AppNav(
                             android.util.Log.d("Navigation", "onCancel called - popping back stack")
                             navController.popBackStack()
                         },
-                        collectionIdProvider = collectionIdProvider
+                        collectionIdProvider = collectionIdProvider,
+                        passedCollectionId = null
+                    )
+                }
+                composable("item/new/{collectionId}") { backStack ->
+                    val collectionId = backStack.arguments?.getString("collectionId")
+                    ItemFormScreen(
+                        onSave = { title, imageUri ->
+                            android.util.Log.d("Navigation", "onSave called - popping back stack")
+                            navController.popBackStack()
+                        },
+                        onCancel = { 
+                            android.util.Log.d("Navigation", "onCancel called - popping back stack")
+                            navController.popBackStack()
+                        },
+                        collectionIdProvider = collectionIdProvider,
+                        passedCollectionId = collectionId
                     )
                 }
                 composable("item/edit/{itemId}") { backStack ->
@@ -1001,7 +1035,8 @@ private fun WelcomeScreen(
 private fun ItemFormScreen(
     onSave: (String, Uri?) -> Unit,
     onCancel: () -> Unit,
-    collectionIdProvider: () -> String?
+    collectionIdProvider: () -> String?,
+    passedCollectionId: String? = null
 ) {
     val activity = LocalContext.current as ComposeMainActivity
     var title by rememberSaveable { mutableStateOf("processing") }
@@ -1330,8 +1365,8 @@ private fun ItemFormScreen(
                     }
                 )
             }
-            if (audioUri != null) {
-                Text(text = if (isRecording) "Recording..." else "Audio attached", style = MaterialTheme.typography.bodySmall)
+            if (audioUri != null && !isRecording) {
+                Text(text = "Audio attached", style = MaterialTheme.typography.bodySmall)
                 IconButton(onClick = { audioUri = null }) {
                     Icon(imageVector = Icons.Filled.Close, contentDescription = "Remove audio")
                 }
@@ -1429,7 +1464,7 @@ private fun ItemFormScreen(
                         return@launch
                     }
                     // Title defaults to "processing"; no validation required.
-                    val collectionId = collectionIdProvider()
+                    val collectionId = passedCollectionId ?: collectionIdProvider()
                     if (collectionId.isNullOrEmpty()) {
                         android.util.Log.w("ItemForm", "Save blocked: No collectionId available")
                         Toast.makeText(activity, "No collection available. Please create one on the server.", Toast.LENGTH_LONG).show()
@@ -1478,7 +1513,8 @@ data class ItemData(
 data class CollectionData(
     val id: String,
     val name: String,
-    val thumbnailUrl: String?
+    val thumbnailUrl: String?,
+    val numberItems: Int
 )
 
 suspend private fun fetchLatestItems(activity: ComposeMainActivity): List<ItemData> {
@@ -1557,7 +1593,8 @@ suspend private fun fetchCollections(activity: ComposeMainActivity): List<Collec
                         val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
                         val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: "Untitled Collection"
                         val thumbnailUrl = obj["thumbnail_url"]?.jsonPrimitive?.contentOrNull
-                        CollectionData(id, name, thumbnailUrl)
+                        val numberItems = obj["number_items"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+                        CollectionData(id, name, thumbnailUrl, numberItems)
                     } ?: emptyList()
                     android.util.Log.d("FetchCollections", "Loaded ${collections.size} collections")
                     collections
@@ -1628,7 +1665,8 @@ suspend private fun fetchCollectionItems(activity: ComposeMainActivity, collecti
 private fun CollectionGalleryScreen(
     collectionId: String,
     onBack: () -> Unit,
-    onItemClick: (String) -> Unit
+    onItemClick: (String) -> Unit,
+    onAddItem: () -> Unit
 ) {
     val activity = LocalContext.current as ComposeMainActivity
     var items by remember { mutableStateOf<List<ItemData>>(emptyList()) }
@@ -1792,13 +1830,16 @@ private fun CollectionGalleryScreen(
                 }
             }
 
-            // Share button
+            // Share and Add Item buttons
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 8.dp),
-                horizontalArrangement = Arrangement.End
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
+                Button(onClick = onAddItem) {
+                    Text("Add Item")
+                }
                 Button(onClick = {
                     activity.lifecycleScope.launch {
                         val token = activity.getAccessToken()
@@ -1941,12 +1982,24 @@ private fun CollectionsList(collections: List<CollectionData>, onCollectionClick
                     ) {
                         if (collection.thumbnailUrl != null) {
                             val activity = LocalContext.current as ComposeMainActivity
+                            // Use collection ID as cache key since signed URLs change with each request
+                            val cacheKey = "collection_thumb_${collection.id}"
                             AsyncImage(
                                 model = ImageRequest.Builder(LocalContext.current)
                                     .data(collection.thumbnailUrl)
                                     .crossfade(true)
+                                    .memoryCacheKey(cacheKey) // Use stable collection ID as cache key
+                                    .diskCacheKey(cacheKey) // Use stable collection ID for disk cache
                                     .memoryCachePolicy(CachePolicy.ENABLED)
                                     .diskCachePolicy(CachePolicy.ENABLED)
+                                    .listener(
+                                        onError = { _, result ->
+                                            android.util.Log.e("CollectionThumbnail", "Failed to load thumbnail: ${collection.thumbnailUrl}, error: ${result.throwable.message}")
+                                        },
+                                        onSuccess = { _, result ->
+                                            android.util.Log.d("CollectionThumbnail", "Successfully loaded thumbnail from ${result.dataSource}: ${collection.thumbnailUrl}")
+                                        }
+                                    )
                                     .build(),
                                 imageLoader = activity.imageLoader,
                                 contentDescription = "${collection.name} thumbnail",
@@ -1969,11 +2022,19 @@ private fun CollectionsList(collections: List<CollectionData>, onCollectionClick
                         }
                     }
                     
-                    Text(
-                        text = collection.name,
-                        style = MaterialTheme.typography.bodyLarge,
+                    Column(
                         modifier = Modifier.weight(1f)
-                    )
+                    ) {
+                        Text(
+                            text = collection.name,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Text(
+                            text = "[${collection.numberItems}]",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
@@ -2001,23 +2062,28 @@ private fun ItemThumbnail(item: ItemData, onClick: () -> Unit) {
         ) {
             if (item.imageUrl != null && item.imageUrl.isNotBlank()) {
                 val activity = LocalContext.current as ComposeMainActivity
+                // Use item ID as cache key since signed URLs change with each request
+                val cacheKey = "item_${item.id}"
                 AsyncImage(
                     model = ImageRequest.Builder(LocalContext.current)
                         .data(item.imageUrl)
                         .crossfade(true)
+                        .memoryCacheKey(cacheKey) // Use stable item ID as cache key
+                        .diskCacheKey(cacheKey) // Use stable item ID for disk cache
                         .memoryCachePolicy(CachePolicy.ENABLED)
                         .diskCachePolicy(CachePolicy.ENABLED)
                         .listener(
                             onError = { _, result ->
                                 android.util.Log.e("ItemThumbnail", "Failed to load image: ${item.imageUrl}, error: ${result.throwable.message}")
                             },
-                            onSuccess = { _, _ ->
-                                android.util.Log.d("ItemThumbnail", "Successfully loaded image: ${item.imageUrl}")
+                            onSuccess = { _, result ->
+                                android.util.Log.d("ItemThumbnail", "Successfully loaded image from ${result.dataSource}: ${item.imageUrl}")
                             }
                         )
                         .build(),
                     imageLoader = activity.imageLoader,
                     contentDescription = item.title,
+                    contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
                     error = androidx.compose.ui.graphics.painter.ColorPainter(Color.LightGray)
                 )
