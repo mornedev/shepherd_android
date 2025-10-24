@@ -10,7 +10,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -28,6 +31,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -41,6 +45,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.PlayArrow
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.ImageLoader
@@ -687,6 +692,42 @@ private fun ItemEditScreen(
             }
         }
 
+        // Audio player section with waveform
+        if (!currentAudioUrl.isNullOrBlank()) {
+            Text(
+                text = "Recording",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 16.dp)
+            )
+            
+            val context = LocalContext.current
+            // Rebuild player when audioUrl changes
+            val exoPlayer = remember(currentAudioUrl) {
+                ExoPlayer.Builder(context).build().apply {
+                    try {
+                        setMediaItem(MediaItem.fromUri(currentAudioUrl!!))
+                        prepare()
+                    } catch (e: Exception) {
+                        android.util.Log.e("AudioPreview", "Failed to prepare player", e)
+                    }
+                }
+            }
+            
+            DisposableEffect(Unit) {
+                onDispose {
+                    exoPlayer.release()
+                }
+            }
+            
+            AudioWaveformPlayer(
+                exoPlayer = exoPlayer,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+                    .height(120.dp)
+            )
+        }
+
         Button(
             onClick = {
                 activity.lifecycleScope.launch {
@@ -900,6 +941,7 @@ private fun WelcomeScreen(
     var isLoadingItems by remember { mutableStateOf(true) }
     var isLoadingCollections by remember { mutableStateOf(true) }
     var selectedTabIndex by remember { mutableStateOf(0) }
+    var showAddCollectionDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
@@ -959,7 +1001,15 @@ private fun WelcomeScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
-                Button(onClick = onAddItem) { Text("Add Item") }
+                Button(onClick = {
+                    if (selectedTabIndex == 0) {
+                        onAddItem()
+                    } else {
+                        showAddCollectionDialog = true
+                    }
+                }) {
+                    Text(if (selectedTabIndex == 0) "Add Item" else "Add Collection")
+                }
             }
 
             // Tabs
@@ -1028,6 +1078,70 @@ private fun WelcomeScreen(
             modifier = Modifier.align(Alignment.TopCenter)
         )
     }
+    
+    // Add Collection Dialog
+    if (showAddCollectionDialog) {
+        AddCollectionDialog(
+            onDismiss = { showAddCollectionDialog = false },
+            onSave = { collectionName ->
+                scope.launch {
+                    val success = createCollection(activity, collectionName)
+                    if (success) {
+                        Toast.makeText(activity, "Collection created successfully", Toast.LENGTH_SHORT).show()
+                        isLoadingCollections = true
+                        collections = fetchCollections(activity)
+                        isLoadingCollections = false
+                        showAddCollectionDialog = false
+                    } else {
+                        Toast.makeText(activity, "Failed to create collection", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun AddCollectionDialog(
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    var collectionName by remember { mutableStateOf("") }
+    
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add Collection") },
+        text = {
+            Column {
+                Text("Enter a name for the new collection:")
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = collectionName,
+                    onValueChange = { collectionName = it },
+                    label = { Text("Collection Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (collectionName.isNotBlank()) {
+                        onSave(collectionName.trim())
+                    }
+                },
+                enabled = collectionName.isNotBlank()
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            Button(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 @OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -1612,6 +1726,42 @@ suspend private fun fetchCollections(activity: ComposeMainActivity): List<Collec
     }
 }
 
+suspend private fun createCollection(activity: ComposeMainActivity, collectionName: String): Boolean {
+    return withContext(Dispatchers.IO) {
+        try {
+            val token = activity.getAccessToken()
+            if (token.isNullOrEmpty()) {
+                android.util.Log.w("CreateCollection", "No token available")
+                return@withContext false
+            }
+            val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/collections")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Authorization", "Bearer $token")
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+                doOutput = true
+                connectTimeout = 10000
+                readTimeout = 15000
+            }
+            try {
+                val payload = "{\"name\":\"${collectionName.replace("\"", "\\\\\"")}\"}"
+                conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+                val code = conn.responseCode
+                val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                    ?.bufferedReader()?.use { it.readText() } ?: ""
+                android.util.Log.d("CreateCollection", "HTTP $code body=$body")
+                code in 200..299
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("CreateCollection", "Exception: ${e.message}", e)
+            false
+        }
+    }
+}
+
 suspend private fun fetchCollectionItems(activity: ComposeMainActivity, collectionId: String): List<ItemData> {
     return withContext(Dispatchers.IO) {
         try {
@@ -2106,6 +2256,149 @@ private fun ItemThumbnail(item: ItemData, onClick: () -> Unit) {
             modifier = Modifier.padding(horizontal = 4.dp)
         )
     }
+}
+
+@Composable
+private fun AudioWaveformPlayer(
+    exoPlayer: ExoPlayer,
+    modifier: Modifier = Modifier
+) {
+    var isPlaying by remember { mutableStateOf(false) }
+    var currentPosition by remember { mutableStateOf(0L) }
+    var duration by remember { mutableStateOf(0L) }
+    
+    // Update playback state
+    LaunchedEffect(exoPlayer) {
+        while (true) {
+            isPlaying = exoPlayer.isPlaying
+            currentPosition = exoPlayer.currentPosition
+            duration = exoPlayer.duration.coerceAtLeast(1L)
+            kotlinx.coroutines.delay(50) // Update every 50ms for smooth animation
+        }
+    }
+    
+    // Generate waveform bars (simulated peaks)
+    val waveformBars = remember {
+        List(60) { i ->
+            // Create varied heights for visual interest
+            (0.3f + (kotlin.math.sin(i * 0.5).toFloat() * 0.4f + 0.4f) * kotlin.random.Random.nextFloat()).coerceIn(0.2f, 1f)
+        }
+    }
+    
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            // Waveform visualization
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .clickable {
+                        // Seek on tap
+                        // Calculate position based on tap
+                    },
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val progress = if (duration > 0) currentPosition.toFloat() / duration.toFloat() else 0f
+                
+                waveformBars.forEachIndexed { index, height ->
+                    val barProgress = index.toFloat() / waveformBars.size
+                    val isPassed = barProgress <= progress
+                    
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(height)
+                            .background(
+                                color = if (isPassed) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                                },
+                                shape = RoundedCornerShape(2.dp)
+                            )
+                    )
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            // Playback controls
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Time display
+                Text(
+                    text = formatTime(currentPosition),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                
+                // Play/Pause button
+                IconButton(
+                    onClick = {
+                        if (isPlaying) {
+                            exoPlayer.pause()
+                        } else {
+                            exoPlayer.play()
+                        }
+                    }
+                ) {
+                    if (isPlaying) {
+                        // Pause icon (two vertical bars)
+                        Canvas(modifier = Modifier.size(32.dp)) {
+                            val barWidth = size.width * 0.25f
+                            val barHeight = size.height * 0.7f
+                            val spacing = size.width * 0.2f
+                            val topOffset = (size.height - barHeight) / 2
+                            
+                            drawRect(
+                                color = androidx.compose.ui.graphics.Color(0xFF6200EE),
+                                topLeft = androidx.compose.ui.geometry.Offset(spacing, topOffset),
+                                size = androidx.compose.ui.geometry.Size(barWidth, barHeight)
+                            )
+                            drawRect(
+                                color = androidx.compose.ui.graphics.Color(0xFF6200EE),
+                                topLeft = androidx.compose.ui.geometry.Offset(size.width - spacing - barWidth, topOffset),
+                                size = androidx.compose.ui.geometry.Size(barWidth, barHeight)
+                            )
+                        }
+                    } else {
+                        Icon(
+                            imageVector = Icons.Filled.PlayArrow,
+                            contentDescription = "Play",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                }
+                
+                // Duration display
+                Text(
+                    text = formatTime(duration),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+private fun formatTime(millis: Long): String {
+    val seconds = (millis / 1000) % 60
+    val minutes = (millis / 1000) / 60
+    return String.format("%d:%02d", minutes, seconds)
 }
 
 suspend private fun postItemMultipart(
