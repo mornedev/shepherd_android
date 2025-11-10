@@ -11,11 +11,11 @@ val apiBaseUrl: String = (project.findProperty("API_BASE_URL") as String?)
     ?: "https://legacyshepherd-api-601845597651.australia-southeast1.run.app"
 
 android {
-    namespace = "com.mamlambofossils.shepherd"
+    namespace = "com.mamlambofossils.legacyhound"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.mamlambofossils.shepherd"
+        applicationId = "com.mamlambofossils.legacyhound"
         minSdk = 31
         targetSdk = 36
         versionCode = 1

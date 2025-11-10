@@ -1,4 +1,4 @@
-package com.mamlambofossils.shepherd
+package com.mamlambofossils.legacyhound
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -10,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,14 +39,21 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Settings
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.ImageLoader
@@ -67,6 +75,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.NavHostController
@@ -140,7 +149,7 @@ class ComposeMainActivity : ComponentActivity() {
 
     private val supabase by lazy {
         createSupabaseClient(
-            supabaseUrl = "https://umvlwoplsdunsvhdqzta.supabase.co",
+            supabaseUrl = "https://api.legacyhound.app",
             supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVtdmx3b3Bsc2R1bnN2aGRxenRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg4NzExOTIsImV4cCI6MjA3NDQ0NzE5Mn0.yrJSp1UPBDyNBvumFJddB3DHG8P1oj_CsNaX-lk6wu4"
         ) {
             install(Auth) {
@@ -436,7 +445,8 @@ suspend private fun fetchItemDetails(activity: ComposeMainActivity, itemId: Stri
                         val imageUrl = obj["image_url"]?.jsonPrimitive?.contentOrNull
                         val audioUrl = obj["audio_url"]?.jsonPrimitive?.contentOrNull
                         val status = obj["status"]?.jsonPrimitive?.contentOrNull
-                        return@withContext ItemData(id, title, description, imageUrl, audioUrl, status)
+                        val collectionId = obj["collection_id"]?.jsonPrimitive?.contentOrNull
+                        return@withContext ItemData(id, title, description, imageUrl, audioUrl, status, collectionId)
                     }
                 } else {
                     android.util.Log.e("FetchItem", "HTTP $code")
@@ -496,7 +506,8 @@ suspend private fun putItemMultipart(
     description: String?,
     newImageUri: Uri?,
     newAudioUri: Uri?,
-    deleteAudio: Boolean
+    deleteAudio: Boolean,
+    collectionId: String?
 ): PostItemResult {
     return withContext(Dispatchers.IO) {
         val boundary = "----ShepherdBoundary" + System.currentTimeMillis()
@@ -523,6 +534,7 @@ suspend private fun putItemMultipart(
 
                 if (title != null) writeField("title", title)
                 if (description != null) writeField("description", description)
+                if (collectionId != null) writeField("collection_id", collectionId)
                 if (deleteAudio) writeField("delete_audio", "true")
 
                 newImageUri?.let { uri ->
@@ -564,6 +576,7 @@ suspend private fun putItemMultipart(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ItemEditScreen(
     itemId: String,
@@ -580,6 +593,9 @@ private fun ItemEditScreen(
     var deleteAudio by remember { mutableStateOf(false) }
     var newImageUri by remember { mutableStateOf<Uri?>(null) }
     var showDeleteDialog by remember { mutableStateOf(false) }
+    var selectedCollectionId by remember { mutableStateOf<String?>(null) }
+    var collections by remember { mutableStateOf<List<CollectionData>>(emptyList()) }
+    var collectionDropdownExpanded by remember { mutableStateOf(false) }
 
     val pickImageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         newImageUri = uri
@@ -587,12 +603,14 @@ private fun ItemEditScreen(
 
     LaunchedEffect(itemId) {
         isLoading = true
+        collections = fetchCollections(activity)
         val details = fetchItemDetails(activity, itemId)
         if (details != null) {
             title = details.title
             description = details.description ?: ""
             currentImageUrl = details.imageUrl
             currentAudioUrl = details.audioUrl
+            selectedCollectionId = details.collectionId
         }
         isLoading = false
     }
@@ -640,6 +658,40 @@ private fun ItemEditScreen(
                 .fillMaxWidth()
                 .padding(top = 16.dp)
         )
+
+        // Collection dropdown
+        ExposedDropdownMenuBox(
+            expanded = collectionDropdownExpanded,
+            onExpandedChange = { collectionDropdownExpanded = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp)
+        ) {
+            OutlinedTextField(
+                value = collections.find { it.id == selectedCollectionId }?.name ?: "Select Collection",
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Collection") },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = collectionDropdownExpanded) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor()
+            )
+            ExposedDropdownMenu(
+                expanded = collectionDropdownExpanded,
+                onDismissRequest = { collectionDropdownExpanded = false }
+            ) {
+                collections.forEach { collection ->
+                    DropdownMenuItem(
+                        text = { Text(collection.name) },
+                        onClick = {
+                            selectedCollectionId = collection.id
+                            collectionDropdownExpanded = false
+                        }
+                    )
+                }
+            }
+        }
 
         Button(
             onClick = { pickImageLauncher.launch("image/*") },
@@ -749,7 +801,8 @@ private fun ItemEditScreen(
                         description = description,
                         newImageUri = newImageUri,
                         newAudioUri = null,
-                        deleteAudio = deleteAudio
+                        deleteAudio = deleteAudio,
+                        collectionId = selectedCollectionId
                     )
                     if (result.success) {
                         Toast.makeText(activity, "Item updated", Toast.LENGTH_SHORT).show()
@@ -846,7 +899,10 @@ private fun AppNav(
                         collectionIdProvider = collectionIdProvider,
                         onAddItem = { navController.navigate("item/new") },
                         onItemClick = { itemId -> navController.navigate("item/edit/$itemId") },
-                        onCollectionClick = { collectionId -> navController.navigate("collection/$collectionId") }
+                        onCollectionClick = { collectionId -> navController.navigate("collection/$collectionId") },
+                        onHelp = { navController.navigate("help") },
+                        onSettings = { navController.navigate("settings") },
+                        onUpgradePlan = { navController.navigate("upgrade-plan") }
                     )
                 }
                 composable("collection/{collectionId}") { backStack ->
@@ -899,7 +955,169 @@ private fun AppNav(
                         collectionIdProvider = collectionIdProvider
                     )
                 }
+                composable("help") {
+                    HelpScreen(onBack = { navController.popBackStack() })
+                }
+                composable("settings") {
+                    SettingsScreen(onBack = { navController.popBackStack() })
+                }
+                composable("upgrade-plan") {
+                    UpgradePlanScreen(onBack = { navController.popBackStack() })
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun SettingsScreen(onBack: () -> Unit) {
+    val activity = LocalContext.current as ComposeMainActivity
+    val scope = rememberCoroutineScope()
+    var showConfirmDialog by remember { mutableStateOf(false) }
+    var isRevoking by remember { mutableStateOf(false) }
+    
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        // Header with back button
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            androidx.compose.material3.TextButton(onClick = onBack) {
+                Text("< Back")
+            }
+            Text(
+                text = "Settings",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Settings content
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Sharing section
+            Text(
+                text = "Sharing",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            
+            Card(
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        text = "Revoke All Collection Shares",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "This will invalidate all share links for your collections. Anyone with existing links will no longer be able to access them.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(
+                        onClick = { showConfirmDialog = true },
+                        enabled = !isRevoking,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        if (isRevoking) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = MaterialTheme.colorScheme.onError
+                            )
+                        } else {
+                            Text("Revoke All Shares")
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Confirmation dialog
+    if (showConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showConfirmDialog = false },
+            title = { Text("Revoke All Shares?") },
+            text = { 
+                Text("Are you sure you want to revoke all collection share links? This action cannot be undone and all existing share links will stop working immediately.")
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        showConfirmDialog = false
+                        isRevoking = true
+                        scope.launch {
+                            val success = revokeAllShares(activity)
+                            isRevoking = false
+                            if (success) {
+                                Toast.makeText(activity, "All shares revoked successfully", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(activity, "Failed to revoke shares", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                ) {
+                    Text("Revoke All", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showConfirmDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun UpgradePlanScreen(onBack: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        // Header with back button
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            androidx.compose.material3.TextButton(onClick = onBack) {
+                Text("< Back")
+            }
+            Text(
+                text = "Upgrade Plan",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Placeholder content
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "Upgrade plan options coming soon...",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -916,10 +1134,193 @@ private fun LoginScreen(onSignIn: () -> Unit, isAuthenticating: Boolean) {
             Spacer(modifier = Modifier.height(16.dp))
             Text(text = "Signing in...")
         } else {
+            Image(
+                painter = painterResource(id = R.drawable.logo),
+                contentDescription = "LegacyHound Logo",
+                modifier = Modifier.size(120.dp)
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "LegacyHound",
+                style = MaterialTheme.typography.headlineMedium
+            )
+            Spacer(modifier = Modifier.height(8.dp))
             Text(text = "Sign in to continue")
             Button(onClick = onSignIn, modifier = Modifier.padding(top = 16.dp)) {
                 Text("Sign in with Google")
             }
+        }
+    }
+}
+
+@Composable
+private fun HelpScreen(onBack: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        // Header with back button
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            androidx.compose.material3.TextButton(onClick = onBack) {
+                Text("< Back")
+            }
+            Text(
+                text = "Help & Guide",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Welcome message
+        Text(
+            text = "Welcome! LegacyVault helps you save the stories behind your most treasured items—and keep your voice with them forever.",
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(bottom = 24.dp)
+        )
+
+        // How it works section
+        Text(
+            text = "How it works (3 quick steps)",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        HelpStep(
+            number = "1",
+            title = "Upload a photo",
+            description = "Tap Add item. Use your camera or choose from your gallery."
+        )
+
+        HelpStep(
+            number = "2",
+            title = "Record your story",
+            description = "Tap Record and speak naturally (30–120s is perfect). We will transcribe the audio into the item description, you can edit the description later."
+        )
+
+        HelpStep(
+            number = "3",
+            title = "Share with loved ones",
+            description = "Add items to a Collection, then tap Share. Send this link to your loved ones. They'll hear your voice as they browse and they can download the gallery to keep forever, ensuring your legacy stays safe."
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Tips section
+        Text(
+            text = "Tips for great results",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        Text(
+            text = "• Quiet space: reduce background noise and hold the phone 15–20 cm from your mouth.\n" +
+                    "• Prompts to try: Where did it come from? Who gave it to you? Why does it matter? What is the value? Any funny memories?\n" +
+                    "• One item, one story: shorter, focused clips are easier to enjoy.",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // Organize section
+        Text(
+            text = "Organize",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        Text(
+            text = "• Use Collections (e.g., \"Family Heirlooms\", \"Travel\", \"Childhood\").",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // Sharing & privacy section
+        Text(
+            text = "Sharing & privacy",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        Text(
+            text = "• Private by default. Only you can see new items until you share.\n" +
+                    "• Links can be revoked anytime in Share → Manage access.",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // Common questions section
+        Text(
+            text = "Common questions",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        Text(
+            text = "Can I edit a story? Yes, open the item from the Collection view. Replace the photo or edit the description.\n\n" +
+                    "Download a backup? Go to the share link and download the zip file, your loved ones can do the same.\n\n" +
+                    "Auto-captions are created for each recording; edit them under the Description field of the item.",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(bottom = 16.dp)
+        )
+
+        // Need help section
+        Text(
+            text = "Need help?",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        Text(
+            text = "Check Profile → Help & Support or email mamlambofossils@gmail.com.\n\n" +
+                    "We're honored to help you preserve your stories.",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(bottom = 24.dp)
+        )
+    }
+}
+
+@Composable
+private fun HelpStep(number: String, title: String, description: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 16.dp)
+    ) {
+        Card(
+            modifier = Modifier.size(40.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primary
+            )
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = number,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -933,24 +1334,32 @@ private fun WelcomeScreen(
     collectionIdProvider: () -> String?,
     onAddItem: () -> Unit,
     onItemClick: (String) -> Unit,
-    onCollectionClick: (String) -> Unit
+    onCollectionClick: (String) -> Unit,
+    onHelp: () -> Unit,
+    onSettings: () -> Unit,
+    onUpgradePlan: () -> Unit
 ) {
     val activity = LocalContext.current as ComposeMainActivity
     var items by remember { mutableStateOf<List<ItemData>>(emptyList()) }
     var collections by remember { mutableStateOf<List<CollectionData>>(emptyList()) }
+    var userPlan by remember { mutableStateOf<UserPlanData?>(null) }
     var isLoadingItems by remember { mutableStateOf(true) }
     var isLoadingCollections by remember { mutableStateOf(true) }
     var selectedTabIndex by remember { mutableStateOf(0) }
     var showAddCollectionDialog by remember { mutableStateOf(false) }
+    var refreshTrigger by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         isLoadingItems = true
         items = fetchLatestItems(activity)
         isLoadingItems = false
+        
+        // Fetch user plan data
+        userPlan = fetchUserPlan(activity)
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(refreshTrigger) {
         isLoadingCollections = true
         collections = fetchCollections(activity)
         android.util.Log.d("WelcomeScreen", "Collections loaded: ${collections.size}")
@@ -959,7 +1368,7 @@ private fun WelcomeScreen(
 
     // Reload collections when switching to Collections tab
     LaunchedEffect(selectedTabIndex) {
-        if (selectedTabIndex == 1 && collections.isEmpty()) {
+        if (selectedTabIndex == 1) {
             isLoadingCollections = true
             collections = fetchCollections(activity)
             android.util.Log.d("WelcomeScreen", "Collections reloaded on tab switch: ${collections.size}")
@@ -999,16 +1408,50 @@ private fun WelcomeScreen(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    IconButton(onClick = onHelp) {
+                        Icon(
+                            imageVector = Icons.Filled.Info,
+                            contentDescription = "Help",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    IconButton(onClick = onSettings) {
+                        Icon(
+                            imageVector = Icons.Filled.Settings,
+                            contentDescription = "Settings",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+                
+                // Check if user has reached plan limit
+                val planLimitReached = userPlan?.let { 
+                    it.totalItems >= it.numberItemsLimit 
+                } ?: false
+                
                 Button(onClick = {
                     if (selectedTabIndex == 0) {
-                        onAddItem()
+                        if (planLimitReached) {
+                            onUpgradePlan()
+                        } else {
+                            onAddItem()
+                        }
                     } else {
                         showAddCollectionDialog = true
                     }
                 }) {
-                    Text(if (selectedTabIndex == 0) "Add Item" else "Add Collection")
+                    Text(
+                        if (selectedTabIndex == 0) {
+                            if (planLimitReached) "Plan limit reached" else "Add Item"
+                        } else {
+                            "Add Collection"
+                        }
+                    )
                 }
             }
 
@@ -1621,7 +2064,8 @@ data class ItemData(
     val description: String?,
     val imageUrl: String?,
     val audioUrl: String?,
-    val status: String?
+    val status: String?,
+    val collectionId: String?
 )
 
 data class CollectionData(
@@ -1629,6 +2073,12 @@ data class CollectionData(
     val name: String,
     val thumbnailUrl: String?,
     val numberItems: Int
+)
+
+data class UserPlanData(
+    val planId: String,
+    val numberItemsLimit: Int,
+    val totalItems: Int
 )
 
 suspend private fun fetchLatestItems(activity: ComposeMainActivity): List<ItemData> {
@@ -1661,8 +2111,9 @@ suspend private fun fetchLatestItems(activity: ComposeMainActivity): List<ItemDa
                         val imageUrl = obj["image_url"]?.jsonPrimitive?.contentOrNull
                         val audioUrl = obj["audio_url"]?.jsonPrimitive?.contentOrNull
                         val status = obj["status"]?.jsonPrimitive?.contentOrNull
+                        val collectionId = obj["collection_id"]?.jsonPrimitive?.contentOrNull
                         android.util.Log.d("FetchItems", "Item: id=$id, title=$title, status=$status, imageUrl=$imageUrl, audioUrl=$audioUrl")
-                        ItemData(id, title, description, imageUrl, audioUrl, status)
+                        ItemData(id, title, description, imageUrl, audioUrl, status, collectionId)
                     } ?: emptyList()
                     android.util.Log.d("FetchItems", "Loaded ${items.size} items")
                     items
@@ -1722,6 +2173,83 @@ suspend private fun fetchCollections(activity: ComposeMainActivity): List<Collec
         } catch (e: Exception) {
             android.util.Log.e("FetchCollections", "Exception: ${e.message}", e)
             emptyList()
+        }
+    }
+}
+
+suspend private fun fetchUserPlan(activity: ComposeMainActivity): UserPlanData? {
+    return withContext(Dispatchers.IO) {
+        try {
+            val token = activity.getAccessToken()
+            if (token.isNullOrEmpty()) {
+                android.util.Log.w("FetchUserPlan", "No token available")
+                return@withContext null
+            }
+            val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/user/plan")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("Authorization", "Bearer $token")
+                setRequestProperty("Accept", "application/json")
+                connectTimeout = 10000
+                readTimeout = 15000
+            }
+            try {
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    val body = conn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
+                    android.util.Log.d("FetchUserPlan", "Response body: $body")
+                    val obj = try { Json.parseToJsonElement(body).jsonObject } catch (_: Exception) { null }
+                    if (obj != null) {
+                        val planId = obj["plan_id"]?.jsonPrimitive?.contentOrNull ?: ""
+                        val numberItemsLimit = obj["number_items_limit"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+                        val totalItems = obj["total_items"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
+                        android.util.Log.d("FetchUserPlan", "Plan: limit=$numberItemsLimit, total=$totalItems")
+                        UserPlanData(planId, numberItemsLimit, totalItems)
+                    } else {
+                        null
+                    }
+                } else {
+                    android.util.Log.e("FetchUserPlan", "HTTP $code")
+                    null
+                }
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("FetchUserPlan", "Exception: ${e.message}", e)
+            null
+        }
+    }
+}
+
+suspend private fun revokeAllShares(activity: ComposeMainActivity): Boolean {
+    return withContext(Dispatchers.IO) {
+        try {
+            val token = activity.getAccessToken()
+            if (token.isNullOrEmpty()) {
+                android.util.Log.w("RevokeAllShares", "No token available")
+                return@withContext false
+            }
+            val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/collections/revoke-all-shares")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Authorization", "Bearer $token")
+                setRequestProperty("Accept", "application/json")
+                connectTimeout = 10000
+                readTimeout = 15000
+            }
+            try {
+                val code = conn.responseCode
+                val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                    ?.bufferedReader()?.use { it.readText() } ?: ""
+                android.util.Log.d("RevokeAllShares", "HTTP $code body=$body")
+                code in 200..299
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("RevokeAllShares", "Exception: ${e.message}", e)
+            false
         }
     }
 }
@@ -1792,7 +2320,8 @@ suspend private fun fetchCollectionItems(activity: ComposeMainActivity, collecti
                         val imageUrl = obj["image_url"]?.jsonPrimitive?.contentOrNull
                         val audioUrl = obj["audio_url"]?.jsonPrimitive?.contentOrNull
                         val status = obj["status"]?.jsonPrimitive?.contentOrNull
-                        ItemData(id, title, description, imageUrl, audioUrl, status)
+                        val collectionId = obj["collection_id"]?.jsonPrimitive?.contentOrNull
+                        ItemData(id, title, description, imageUrl, audioUrl, status, collectionId)
                     } ?: emptyList()
                     android.util.Log.d("FetchCollectionItems", "Loaded ${items.size} items for collection $collectionId")
                     items
@@ -2132,14 +2661,20 @@ private fun CollectionsList(collections: List<CollectionData>, onCollectionClick
                     ) {
                         if (collection.thumbnailUrl != null) {
                             val activity = LocalContext.current as ComposeMainActivity
-                            // Use collection ID as cache key since signed URLs change with each request
-                            val cacheKey = "collection_thumb_${collection.id}"
+                            // Extract filename from thumbnail URL to use as cache key
+                            // This ensures that when an item moves to a different collection, 
+                            // the old thumbnail is not cached incorrectly
+                            val filename = collection.thumbnailUrl?.let { url ->
+                                // Extract the filename from the path (before query parameters)
+                                url.substringAfterLast("/").substringBefore("?").substringBeforeLast(".")
+                            } ?: collection.id
+                            val cacheKey = "collection_thumb_${filename}"
                             AsyncImage(
                                 model = ImageRequest.Builder(LocalContext.current)
                                     .data(collection.thumbnailUrl)
                                     .crossfade(true)
-                                    .memoryCacheKey(cacheKey) // Use stable collection ID as cache key
-                                    .diskCacheKey(cacheKey) // Use stable collection ID for disk cache
+                                    .memoryCacheKey(cacheKey) // Use filename as cache key
+                                    .diskCacheKey(cacheKey) // Use filename for disk cache
                                     .memoryCachePolicy(CachePolicy.ENABLED)
                                     .diskCachePolicy(CachePolicy.ENABLED)
                                     .listener(

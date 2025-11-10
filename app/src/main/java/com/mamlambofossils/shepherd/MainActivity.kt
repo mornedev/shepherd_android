@@ -1,4 +1,4 @@
-package com.mamlambofossils.shepherd
+package com.mamlambofossils.legacyhound
 
 import android.os.Bundle
 import com.google.android.material.snackbar.Snackbar
@@ -10,7 +10,7 @@ import androidx.navigation.ui.setupActionBarWithNavController
 import android.view.Menu
 import android.view.MenuItem
 import androidx.lifecycle.lifecycleScope
-import com.mamlambofossils.shepherd.databinding.ActivityMainBinding
+import com.mamlambofossils.legacyhound.databinding.ActivityMainBinding
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.gotrue.Auth
 import io.github.jan.supabase.gotrue.auth
@@ -32,7 +32,7 @@ class MainActivity : AppCompatActivity() {
     // Supabase client configured for Android OAuth deep links
     private val supabase by lazy {
         createSupabaseClient(
-            supabaseUrl = "https://umvlwoplsdunsvhdqzta.supabase.co",
+            supabaseUrl = "https://api.legacyhound.app",
             supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVtdmx3b3Bsc2R1bnN2aGRxenRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg4NzExOTIsImV4cCI6MjA3NDQ0NzE5Mn0.yrJSp1UPBDyNBvumFJddB3DHG8P1oj_CsNaX-lk6wu4"
         ) {
             install(Auth) {
