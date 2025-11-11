@@ -975,10 +975,19 @@ private fun SettingsScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var showConfirmDialog by remember { mutableStateOf(false) }
     var isRevoking by remember { mutableStateOf(false) }
+    var userPlan by remember { mutableStateOf<UserPlanData?>(null) }
+    var isLoadingPlan by remember { mutableStateOf(true) }
+    
+    // Fetch user plan on screen load
+    LaunchedEffect(Unit) {
+        userPlan = fetchUserPlan(activity)
+        isLoadingPlan = false
+    }
     
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
         // Header with back button
@@ -1003,6 +1012,44 @@ private fun SettingsScreen(onBack: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // Plan section
+            Text(
+                text = "Plan",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            
+            Card(
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    if (isLoadingPlan) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    } else if (userPlan != null) {
+                        Text(
+                            text = "Current Plan: ${userPlan!!.planName.replaceFirstChar { it.uppercase() }}",
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Items: ${userPlan!!.totalItems} / ${userPlan!!.numberItemsLimit}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        Text(
+                            text = "Unable to load plan information",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
             // Sharing section
             Text(
                 text = "Sharing",
@@ -2077,6 +2124,7 @@ data class CollectionData(
 
 data class UserPlanData(
     val planId: String,
+    val planName: String,
     val numberItemsLimit: Int,
     val totalItems: Int
 )
@@ -2201,10 +2249,11 @@ suspend private fun fetchUserPlan(activity: ComposeMainActivity): UserPlanData? 
                     val obj = try { Json.parseToJsonElement(body).jsonObject } catch (_: Exception) { null }
                     if (obj != null) {
                         val planId = obj["plan_id"]?.jsonPrimitive?.contentOrNull ?: ""
+                        val planName = obj["plan_name"]?.jsonPrimitive?.contentOrNull ?: "Unknown"
                         val numberItemsLimit = obj["number_items_limit"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
                         val totalItems = obj["total_items"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
-                        android.util.Log.d("FetchUserPlan", "Plan: limit=$numberItemsLimit, total=$totalItems")
-                        UserPlanData(planId, numberItemsLimit, totalItems)
+                        android.util.Log.d("FetchUserPlan", "Plan: name=$planName, limit=$numberItemsLimit, total=$totalItems")
+                        UserPlanData(planId, planName, numberItemsLimit, totalItems)
                     } else {
                         null
                     }
