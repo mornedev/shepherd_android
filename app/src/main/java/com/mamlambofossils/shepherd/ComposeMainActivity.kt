@@ -49,6 +49,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PlayArrow
@@ -128,6 +129,11 @@ import java.net.URL
 
 class ComposeMainActivity : ComponentActivity() {
 
+    // User plan cache with 1-hour expiration
+    private var cachedUserPlan: UserPlanData? = null
+    private var planCacheTimestamp: Long = 0
+    private val PLAN_CACHE_DURATION_MS = 60 * 60 * 1000L // 1 hour in milliseconds
+
     // Configure Coil ImageLoader with aggressive caching
     internal val imageLoader by lazy {
         ImageLoader.Builder(this)
@@ -166,6 +172,34 @@ class ComposeMainActivity : ComponentActivity() {
     fun getApiBaseUrl(): String = BuildConfig.API_BASE_URL
 
     suspend fun getAccessToken(): String? = supabase.auth.currentSessionOrNull()?.accessToken
+
+    // Get cached user plan or fetch if expired
+    suspend fun getCachedUserPlan(): UserPlanData? {
+        val currentTime = System.currentTimeMillis()
+        
+        // Check if cache is valid (within 1 hour)
+        if (cachedUserPlan != null && (currentTime - planCacheTimestamp) < PLAN_CACHE_DURATION_MS) {
+            android.util.Log.d("UserPlanCache", "Returning cached plan: ${cachedUserPlan?.planId}")
+            return cachedUserPlan
+        }
+        
+        // Cache expired or doesn't exist, fetch new data
+        android.util.Log.d("UserPlanCache", "Cache expired or empty, fetching new plan")
+        val freshPlan = fetchUserPlan(this)
+        if (freshPlan != null) {
+            cachedUserPlan = freshPlan
+            planCacheTimestamp = currentTime
+            android.util.Log.d("UserPlanCache", "Cached new plan: ${freshPlan.planId}")
+        }
+        return freshPlan
+    }
+    
+    // Clear the plan cache (useful when user changes subscription)
+    fun clearPlanCache() {
+        cachedUserPlan = null
+        planCacheTimestamp = 0
+        android.util.Log.d("UserPlanCache", "Plan cache cleared")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -978,9 +1012,9 @@ private fun SettingsScreen(onBack: () -> Unit) {
     var userPlan by remember { mutableStateOf<UserPlanData?>(null) }
     var isLoadingPlan by remember { mutableStateOf(true) }
     
-    // Fetch user plan on screen load
+    // Fetch user plan on screen load (with caching)
     LaunchedEffect(Unit) {
-        userPlan = fetchUserPlan(activity)
+        userPlan = activity.getCachedUserPlan()
         isLoadingPlan = false
     }
     
@@ -1172,7 +1206,9 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
 @Composable
 private fun LoginScreen(onSignIn: () -> Unit, isAuthenticating: Boolean) {
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFFFEA654)),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -1186,13 +1222,23 @@ private fun LoginScreen(onSignIn: () -> Unit, isAuthenticating: Boolean) {
                 contentDescription = "LegacyHound Logo",
                 modifier = Modifier.size(120.dp)
             )
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Your legacy, for generations",
+                style = MaterialTheme.typography.titleMedium,
+                color = Color.White
+            )
+            Spacer(modifier = Modifier.height(24.dp))
             Text(
                 text = "LegacyHound",
-                style = MaterialTheme.typography.headlineMedium
+                style = MaterialTheme.typography.headlineMedium,
+                color = Color.White
             )
             Spacer(modifier = Modifier.height(8.dp))
-            Text(text = "Sign in to continue")
+            Text(
+                text = "Sign in to continue",
+                color = Color.White
+            )
             Button(onClick = onSignIn, modifier = Modifier.padding(top = 16.dp)) {
                 Text("Sign in with Google")
             }
@@ -1402,8 +1448,8 @@ private fun WelcomeScreen(
         items = fetchLatestItems(activity)
         isLoadingItems = false
         
-        // Fetch user plan data
-        userPlan = fetchUserPlan(activity)
+        // Fetch user plan data (with caching)
+        userPlan = activity.getCachedUserPlan()
     }
 
     LaunchedEffect(refreshTrigger) {
@@ -1552,7 +1598,11 @@ private fun WelcomeScreen(
                             CircularProgressIndicator()
                         }
                     } else if (collections.isNotEmpty()) {
-                        CollectionsList(collections = collections, onCollectionClick = onCollectionClick)
+                        CollectionsList(
+                            collections = collections, 
+                            onCollectionClick = onCollectionClick,
+                            onDelete = { refreshTrigger++ }
+                        )
                     } else {
                         Text(
                             text = "No collections found",
@@ -1652,7 +1702,17 @@ private fun ItemFormScreen(
     var showCamera by rememberSaveable { mutableStateOf(false) }
     var imageCapture by remember { mutableStateOf<androidx.camera.core.ImageCapture?>(null) }
     var amplitudes by remember { mutableStateOf(listOf<Float>()) }
+    var recordingTimeSeconds by remember { mutableStateOf(0) }
+    var userPlan by remember { mutableStateOf<UserPlanData?>(null) }
     val scope = rememberCoroutineScope()
+    
+    // Fetch user plan to determine recording time limit (with caching)
+    LaunchedEffect(Unit) {
+        userPlan = activity.getCachedUserPlan()
+    }
+    
+    // Determine max recording time based on plan (25s for free, 60s for others)
+    val maxRecordingSeconds = if (userPlan?.planId == "5019a2e2-bf60-451f-ad5b-5066c4065dd5") 25 else 60
     
     android.util.Log.d("ItemFormScreen", "Composing ItemFormScreen")
     
@@ -1737,8 +1797,9 @@ private fun ItemFormScreen(
             recorder.start()
             isRecording = true
             amplitudes = listOf() // Reset amplitudes
+            recordingTimeSeconds = 0 // Reset timer
             
-            // Start amplitude polling
+            // Start amplitude polling and timer
             scope.launch {
                 while (isRecording) {
                     try {
@@ -1749,6 +1810,35 @@ private fun ItemFormScreen(
                         android.util.Log.e("AudioRecord", "Error reading amplitude", e)
                     }
                     kotlinx.coroutines.delay(50) // Poll every 50ms
+                }
+            }
+            
+            // Start recording timer
+            scope.launch {
+                while (isRecording && recordingTimeSeconds < maxRecordingSeconds) {
+                    kotlinx.coroutines.delay(1000)
+                    if (isRecording) {
+                        recordingTimeSeconds++
+                        // Auto-stop when time limit reached
+                        if (recordingTimeSeconds >= maxRecordingSeconds) {
+                            // Stop recording inline
+                            try {
+                                mediaRecorder?.apply {
+                                    stop()
+                                    release()
+                                }
+                                android.util.Log.d("AudioRecord", "Recording auto-stopped at time limit")
+                            } catch (e: Exception) {
+                                android.util.Log.e("AudioRecord", "Error stopping recording", e)
+                            } finally {
+                                try { outputPfd?.close() } catch (_: Exception) {}
+                                outputPfd = null
+                                mediaRecorder = null
+                                isRecording = false
+                            }
+                            Toast.makeText(activity, "Maximum recording time reached", Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 }
             }
             
@@ -1881,25 +1971,38 @@ private fun ItemFormScreen(
         }
 
         if (!showCamera) {
-            Text(text = "Load new item", style = MaterialTheme.typography.headlineMedium)
-            // Title field removed. Title defaults to "processing" and is not user-editable.
+            Text(text = "Add New Item", style = MaterialTheme.typography.headlineMedium)
+            
+            // Step 1: Photo
+            Text(
+                text = "Step 1: Add Photo",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(top = 24.dp, bottom = 8.dp)
+            )
             Row(
-                modifier = Modifier.padding(top = 16.dp),
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Button(onClick = {
-                    val hasCam = androidx.core.content.ContextCompat.checkSelfPermission(
-                        activity, android.Manifest.permission.CAMERA
-                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                    if (hasCam) {
-                        showCamera = true
-                    } else {
-                        requestCameraPermission.launch(android.Manifest.permission.CAMERA)
-                    }
-                }) {
+                Button(
+                    onClick = {
+                        val hasCam = androidx.core.content.ContextCompat.checkSelfPermission(
+                            activity, android.Manifest.permission.CAMERA
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        if (hasCam) {
+                            showCamera = true
+                        } else {
+                            requestCameraPermission.launch(android.Manifest.permission.CAMERA)
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text("Take Photo")
                 }
-                Button(onClick = { pickImageLauncher.launch("image/*") }) {
+                Button(
+                    onClick = { pickImageLauncher.launch("image/*") },
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text(if (imageUri != null) "Change Photo" else "Pick Photo")
                 }
             }
@@ -1950,11 +2053,15 @@ private fun ItemFormScreen(
             }
         }
         
-        // Audio recording section (in-app MediaRecorder)
+        // Step 2: Audio
+        Text(
+            text = "Step 2: Record Audio",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(top = 24.dp, bottom = 8.dp)
+        )
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 16.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -2009,6 +2116,30 @@ private fun ItemFormScreen(
                                 size = androidx.compose.ui.geometry.Size(barWidth, barHeight)
                             )
                         }
+                    }
+                    // Recording timer overlay
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        val remainingSeconds = maxRecordingSeconds - recordingTimeSeconds
+                        Text(
+                            text = String.format("%d:%02d", remainingSeconds / 60, remainingSeconds % 60),
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = if (remainingSeconds <= 5) Color.Red else MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.background(
+                                color = Color.White.copy(alpha = 0.8f),
+                                shape = RoundedCornerShape(8.dp)
+                            ).padding(horizontal = 12.dp, vertical = 4.dp)
+                        )
+                        Text(
+                            text = "remaining",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.background(
+                                color = Color.White.copy(alpha = 0.8f),
+                                shape = RoundedCornerShape(4.dp)
+                            ).padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
                     }
                 }
             }
@@ -2092,7 +2223,10 @@ private fun ItemFormScreen(
                     }
                 }
             },
-            modifier = Modifier.padding(top = 24.dp)
+            modifier = Modifier.padding(top = 24.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFF4CAF50)
+            )
         ) { Text("Save Item") }
         Button(
             onClick = onCancel,
@@ -2221,6 +2355,41 @@ suspend private fun fetchCollections(activity: ComposeMainActivity): List<Collec
         } catch (e: Exception) {
             android.util.Log.e("FetchCollections", "Exception: ${e.message}", e)
             emptyList()
+        }
+    }
+}
+
+suspend private fun deleteCollection(activity: ComposeMainActivity, collectionId: String): Boolean {
+    return withContext(Dispatchers.IO) {
+        try {
+            val token = activity.getAccessToken()
+            if (token.isNullOrEmpty()) {
+                android.util.Log.w("DeleteCollection", "No token available")
+                return@withContext false
+            }
+            val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/collections/$collectionId")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "DELETE"
+                setRequestProperty("Authorization", "Bearer $token")
+                connectTimeout = 10000
+                readTimeout = 15000
+            }
+            try {
+                val code = conn.responseCode
+                if (code == 204) {
+                    android.util.Log.d("DeleteCollection", "Collection deleted successfully")
+                    return@withContext true
+                } else {
+                    val body = (conn.errorStream ?: conn.inputStream)?.bufferedReader()?.use { it.readText() } ?: ""
+                    android.util.Log.e("DeleteCollection", "HTTP $code: $body")
+                    return@withContext false
+                }
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("DeleteCollection", "Exception: ${e.message}", e)
+            return@withContext false
         }
     }
 }
@@ -2402,6 +2571,7 @@ private fun CollectionGalleryScreen(
     var isLoading by remember { mutableStateOf(true) }
     var isEditingName by remember { mutableStateOf(false) }
     var editedName by remember { mutableStateOf("") }
+    var showDeleteDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(collectionId) {
         isLoading = true
@@ -2568,64 +2738,77 @@ private fun CollectionGalleryScreen(
                 Button(onClick = onAddItem) {
                     Text("Add Item")
                 }
-                Button(onClick = {
-                    activity.lifecycleScope.launch {
-                        val token = activity.getAccessToken()
-                        if (token.isNullOrEmpty()) {
-                            Toast.makeText(activity, "Not authenticated", Toast.LENGTH_SHORT).show()
-                            return@launch
-                        }
-                        withContext(Dispatchers.IO) {
-                            try {
-                                val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/collections/$collectionId/publish")
-                                val conn = (url.openConnection() as HttpURLConnection).apply {
-                                    requestMethod = "POST"
-                                    setRequestProperty("Authorization", "Bearer $token")
-                                    setRequestProperty("Accept", "application/json")
-                                    doOutput = true
-                                    connectTimeout = 10000
-                                    readTimeout = 15000
-                                }
+                // Show "Delete Collection" if empty, otherwise "Share Collection"
+                if (items.isEmpty() && !isLoading) {
+                    Button(
+                        onClick = { showDeleteDialog = true },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.Red,
+                            contentColor = Color.White
+                        )
+                    ) {
+                        Text("Delete Collection")
+                    }
+                } else {
+                    Button(onClick = {
+                        activity.lifecycleScope.launch {
+                            val token = activity.getAccessToken()
+                            if (token.isNullOrEmpty()) {
+                                Toast.makeText(activity, "Not authenticated", Toast.LENGTH_SHORT).show()
+                                return@launch
+                            }
+                            withContext(Dispatchers.IO) {
                                 try {
-                                    val code = conn.responseCode
-                                    val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
-                                        ?.bufferedReader()?.use { it.readText() } ?: ""
-                                    android.util.Log.d("PublishCollection", "HTTP $code body=$body")
-                                    if (code in 200..299) {
-                                        val obj = try { Json.parseToJsonElement(body).jsonObject } catch (_: Exception) { null }
-                                        val shareUrl = obj?.get("url")?.jsonPrimitive?.contentOrNull
-                                        withContext(Dispatchers.Main) {
-                                            if (!shareUrl.isNullOrBlank()) {
-                                                val clipboard = activity.getSystemService(ClipboardManager::class.java)
-                                                clipboard?.setPrimaryClip(ClipData.newPlainText("Collection Link", shareUrl))
-                                                Toast.makeText(activity, "Share link copied", Toast.LENGTH_SHORT).show()
-                                            } else {
-                                                Toast.makeText(activity, "Failed to get link", Toast.LENGTH_LONG).show()
+                                    val url = URL(activity.getApiBaseUrl().trimEnd('/') + "/collections/$collectionId/publish")
+                                    val conn = (url.openConnection() as HttpURLConnection).apply {
+                                        requestMethod = "POST"
+                                        setRequestProperty("Authorization", "Bearer $token")
+                                        setRequestProperty("Accept", "application/json")
+                                        doOutput = true
+                                        connectTimeout = 10000
+                                        readTimeout = 15000
+                                    }
+                                    try {
+                                        val code = conn.responseCode
+                                        val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                                            ?.bufferedReader()?.use { it.readText() } ?: ""
+                                        android.util.Log.d("PublishCollection", "HTTP $code body=$body")
+                                        if (code in 200..299) {
+                                            val obj = try { Json.parseToJsonElement(body).jsonObject } catch (_: Exception) { null }
+                                            val shareUrl = obj?.get("url")?.jsonPrimitive?.contentOrNull
+                                            withContext(Dispatchers.Main) {
+                                                if (!shareUrl.isNullOrBlank()) {
+                                                    val clipboard = activity.getSystemService(ClipboardManager::class.java)
+                                                    clipboard?.setPrimaryClip(ClipData.newPlainText("Collection Link", shareUrl))
+                                                    Toast.makeText(activity, "Share link copied", Toast.LENGTH_SHORT).show()
+                                                } else {
+                                                    Toast.makeText(activity, "Failed to get link", Toast.LENGTH_LONG).show()
+                                                }
+                                            }
+                                        } else {
+                                            withContext(Dispatchers.Main) {
+                                                Toast.makeText(activity, "Failed to publish ($code)", Toast.LENGTH_LONG).show()
                                             }
                                         }
-                                    } else {
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("PublishCollection", "Exception: ${e.message}", e)
                                         withContext(Dispatchers.Main) {
-                                            Toast.makeText(activity, "Failed to publish ($code)", Toast.LENGTH_LONG).show()
+                                            Toast.makeText(activity, "Error publishing link", Toast.LENGTH_LONG).show()
                                         }
+                                    } finally {
+                                        conn.disconnect()
                                     }
                                 } catch (e: Exception) {
                                     android.util.Log.e("PublishCollection", "Exception: ${e.message}", e)
                                     withContext(Dispatchers.Main) {
                                         Toast.makeText(activity, "Error publishing link", Toast.LENGTH_LONG).show()
                                     }
-                                } finally {
-                                    conn.disconnect()
-                                }
-                            } catch (e: Exception) {
-                                android.util.Log.e("PublishCollection", "Exception: ${e.message}", e)
-                                withContext(Dispatchers.Main) {
-                                    Toast.makeText(activity, "Error publishing link", Toast.LENGTH_LONG).show()
                                 }
                             }
                         }
+                    }) {
+                        Text("Share Collection")
                     }
-                }) {
-                    Text("Share Collection")
                 }
             }
 
@@ -2664,6 +2847,42 @@ private fun CollectionGalleryScreen(
             modifier = Modifier.align(Alignment.TopCenter)
         )
     }
+    
+    // Delete confirmation dialog
+    if (showDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("Delete Collection?") },
+            text = { 
+                Text("Are you sure you want to delete \"${collectionName ?: "this collection"}\"? This action cannot be undone.")
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        showDeleteDialog = false
+                        activity.lifecycleScope.launch {
+                            val success = deleteCollection(activity, collectionId)
+                            if (success) {
+                                Toast.makeText(activity, "Collection deleted", Toast.LENGTH_SHORT).show()
+                                onBack() // Navigate back after deletion
+                            } else {
+                                Toast.makeText(activity, "Failed to delete collection", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                ) {
+                    Text("Delete", color = Color.Red)
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = { showDeleteDialog = false }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -2682,7 +2901,16 @@ private fun ItemsGrid(items: List<ItemData>, onItemClick: (String) -> Unit) {
 }
 
 @Composable
-private fun CollectionsList(collections: List<CollectionData>, onCollectionClick: (String) -> Unit) {
+private fun CollectionsList(
+    collections: List<CollectionData>, 
+    onCollectionClick: (String) -> Unit,
+    onDelete: () -> Unit = {}
+) {
+    val activity = LocalContext.current as ComposeMainActivity
+    val scope = rememberCoroutineScope()
+    var collectionToDelete by remember { mutableStateOf<CollectionData?>(null) }
+    var isDeleting by remember { mutableStateOf(false) }
+    
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -2772,6 +3000,51 @@ private fun CollectionsList(collections: List<CollectionData>, onCollectionClick
                 }
             }
         }
+    }
+    
+    // Confirmation dialog
+    if (collectionToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { collectionToDelete = null },
+            title = { Text("Delete Collection?") },
+            text = { 
+                Text("Are you sure you want to delete \"${collectionToDelete!!.name}\"? This action cannot be undone.")
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        val collection = collectionToDelete!!
+                        collectionToDelete = null
+                        isDeleting = true
+                        scope.launch {
+                            val success = deleteCollection(activity, collection.id)
+                            isDeleting = false
+                            if (success) {
+                                Toast.makeText(activity, "Collection deleted", Toast.LENGTH_SHORT).show()
+                                onDelete() // Trigger refresh
+                            } else {
+                                Toast.makeText(activity, "Failed to delete collection", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    },
+                    enabled = !isDeleting
+                ) {
+                    if (isDeleting) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                    } else {
+                        Text("Delete", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = { collectionToDelete = null },
+                    enabled = !isDeleting
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
