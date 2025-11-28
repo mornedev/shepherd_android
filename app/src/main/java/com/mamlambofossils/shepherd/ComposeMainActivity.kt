@@ -71,11 +71,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
@@ -119,6 +125,7 @@ import io.github.jan.supabase.gotrue.providers.Google
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -126,6 +133,22 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.HttpURLConnection
 import java.net.URL
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.darkColorScheme
+
+// Brand colors
+object BrandColors {
+    val Orange = Color(0xFFF27907)
+    val Green = Color(0xFF4CAF50)
+}
+
+// Custom color scheme with brand orange as primary
+private val LegacyHoundLightColorScheme = lightColorScheme(
+    primary = BrandColors.Orange,
+    onPrimary = Color.Black,
+    primaryContainer = BrandColors.Orange,
+    onPrimaryContainer = Color.Black
+)
 
 class ComposeMainActivity : ComponentActivity() {
 
@@ -406,9 +429,23 @@ class ComposeMainActivity : ComponentActivity() {
 }
 
 // Decode and resize an image from a Uri so the longest side is <= maxSizePx.
-// Returns a JPEG-compressed byte array.
+// Returns a JPEG-compressed byte array with correct orientation applied.
 private fun resizeImageToMax(resolver: ContentResolver, uri: Uri, maxSizePx: Int): ByteArray {
-    // 1) Bounds decode to get dimensions
+    // 1) Read EXIF orientation
+    var exifOrientation = androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL
+    try {
+        resolver.openInputStream(uri)?.use { inputStream ->
+            val exif = androidx.exifinterface.media.ExifInterface(inputStream)
+            exifOrientation = exif.getAttributeInt(
+                androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL
+            )
+        }
+    } catch (e: Exception) {
+        android.util.Log.w("resizeImageToMax", "Failed to read EXIF orientation", e)
+    }
+
+    // 2) Bounds decode to get dimensions
     val optsBounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, optsBounds) }
     val srcW = optsBounds.outWidth
@@ -418,7 +455,7 @@ private fun resizeImageToMax(resolver: ContentResolver, uri: Uri, maxSizePx: Int
         return resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
     }
 
-    // 2) Compute inSampleSize to get close to target with less memory
+    // 3) Compute inSampleSize to get close to target with less memory
     var inSample = 1
     val maxSrc = maxOf(srcW, srcH)
     if (maxSrc > maxSizePx) {
@@ -434,22 +471,48 @@ private fun resizeImageToMax(resolver: ContentResolver, uri: Uri, maxSizePx: Int
         return resolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
     }
 
-    // 3) Scale precisely to max dimension if still larger than max
-    val w = decoded.width
-    val h = decoded.height
+    // 4) Apply EXIF orientation transformation
+    val rotatedBitmap = when (exifOrientation) {
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> {
+            val matrix = android.graphics.Matrix().apply { postRotate(90f) }
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+        }
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> {
+            val matrix = android.graphics.Matrix().apply { postRotate(180f) }
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+        }
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> {
+            val matrix = android.graphics.Matrix().apply { postRotate(270f) }
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+        }
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> {
+            val matrix = android.graphics.Matrix().apply { postScale(-1f, 1f) }
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+        }
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> {
+            val matrix = android.graphics.Matrix().apply { postScale(1f, -1f) }
+            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+        }
+        else -> decoded
+    }
+    if (rotatedBitmap !== decoded) decoded.recycle()
+
+    // 5) Scale precisely to max dimension if still larger than max
+    val w = rotatedBitmap.width
+    val h = rotatedBitmap.height
     val scale = if (w >= h) maxSizePx.toFloat() / w.toFloat() else maxSizePx.toFloat() / h.toFloat()
     val finalBitmap = if (maxOf(w, h) > maxSizePx) {
         val newW = (w * scale).toInt().coerceAtLeast(1)
         val newH = (h * scale).toInt().coerceAtLeast(1)
-        Bitmap.createScaledBitmap(decoded, newW, newH, true)
+        Bitmap.createScaledBitmap(rotatedBitmap, newW, newH, true)
     } else {
-        decoded
+        rotatedBitmap
     }
 
-    // 4) Compress to JPEG
+    // 6) Compress to JPEG
     val out = ByteArrayOutputStream()
     finalBitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
-    if (finalBitmap !== decoded) decoded.recycle()
+    if (finalBitmap !== rotatedBitmap) rotatedBitmap.recycle()
     return out.toByteArray()
 }
 
@@ -630,6 +693,7 @@ private fun ItemEditScreen(
     var selectedCollectionId by remember { mutableStateOf<String?>(null) }
     var collections by remember { mutableStateOf<List<CollectionData>>(emptyList()) }
     var collectionDropdownExpanded by remember { mutableStateOf(false) }
+    var showFullScreenImage by remember { mutableStateOf(false) }
 
     val pickImageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         newImageUri = uri
@@ -637,8 +701,13 @@ private fun ItemEditScreen(
 
     LaunchedEffect(itemId) {
         isLoading = true
-        collections = fetchCollections(activity)
-        val details = fetchItemDetails(activity, itemId)
+        // Fetch collections and item details in parallel to improve loading performance
+        val collectionsDeferred = async { fetchCollections(activity) }
+        val detailsDeferred = async { fetchItemDetails(activity, itemId) }
+        
+        collections = collectionsDeferred.await()
+        val details = detailsDeferred.await()
+        
         if (details != null) {
             title = details.title
             description = details.description ?: ""
@@ -649,13 +718,15 @@ private fun ItemEditScreen(
         isLoading = false
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.Top
-    ) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Main form content (rendered first, at bottom layer)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.Top
+        ) {
         // Header with back button
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -742,6 +813,7 @@ private fun ItemEditScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(200.dp)
+                        .clickable { showFullScreenImage = true }
                 ) {
                     val modelData: Any? = newImageUri ?: currentImageUrl
                     val activity = LocalContext.current as ComposeMainActivity
@@ -853,7 +925,8 @@ private fun ItemEditScreen(
             onClick = onCancel,
             modifier = Modifier.padding(top = 8.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.secondary
+                containerColor = MaterialTheme.colorScheme.secondary,
+                contentColor = Color.White
             )
         ) { Text("Cancel") }
 
@@ -861,9 +934,89 @@ private fun ItemEditScreen(
             onClick = { showDeleteDialog = true },
             modifier = Modifier.padding(top = 16.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.error
+                containerColor = MaterialTheme.colorScheme.error,
+                contentColor = Color.White
             )
         ) { Text("Delete Item") }
+        }
+        
+        // Full-screen image overlay (rendered last, on top layer)
+        if (showFullScreenImage && (newImageUri != null || !currentImageUrl.isNullOrBlank())) {
+            var scale by remember { mutableStateOf(1f) }
+            var offsetX by remember { mutableStateOf(0f) }
+            var offsetY by remember { mutableStateOf(0f) }
+            
+            // Get screen dimensions for bounds calculation
+            val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+            val screenWidthPx = with(androidx.compose.ui.platform.LocalDensity.current) { 
+                configuration.screenWidthDp.dp.toPx() 
+            }
+            val screenHeightPx = with(androidx.compose.ui.platform.LocalDensity.current) { 
+                configuration.screenHeightDp.dp.toPx() 
+            }
+            
+            val state = rememberTransformableState { zoomChange, offsetChange, _ ->
+                scale = (scale * zoomChange).coerceIn(1f, 5f)
+                
+                // Calculate the maximum allowed offset based on scale
+                // When scale = 1, no panning allowed (maxOffset = 0)
+                // When scale > 1, allow panning up to the scaled image bounds
+                val maxOffsetX = (screenWidthPx * (scale - 1f)) / 2f
+                val maxOffsetY = (screenHeightPx * (scale - 1f)) / 2f
+                
+                // Apply offset change and constrain to bounds
+                offsetX = (offsetX + offsetChange.x).coerceIn(-maxOffsetX, maxOffsetX)
+                offsetY = (offsetY + offsetChange.y).coerceIn(-maxOffsetY, maxOffsetY)
+            }
+            
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+            ) {
+                val modelData: Any? = newImageUri ?: currentImageUrl
+                val activity = LocalContext.current as ComposeMainActivity
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(modelData)
+                        .crossfade(true)
+                        .memoryCachePolicy(CachePolicy.ENABLED)
+                        .diskCachePolicy(CachePolicy.ENABLED)
+                        .build(),
+                    imageLoader = activity.imageLoader,
+                    contentDescription = "Full screen item image",
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offsetX,
+                            translationY = offsetY
+                        )
+                        .transformable(state = state),
+                    contentScale = ContentScale.Fit
+                )
+                // Close button
+                IconButton(
+                    onClick = { 
+                        showFullScreenImage = false
+                        scale = 1f
+                        offsetX = 0f
+                        offsetY = 0f
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(16.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Close full screen",
+                        tint = Color.White,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+            }
+        }
     }
 
     // Delete confirmation dialog
@@ -920,7 +1073,9 @@ private fun AppNav(
     onlyOneCollection: Boolean,
     isAuthenticating: Boolean
 ) {
-    MaterialTheme {
+    MaterialTheme(
+        colorScheme = LegacyHoundLightColorScheme
+    ) {
         Scaffold { padding ->
             NavHost(navController = navController, startDestination = "login", modifier = Modifier.padding(padding)) {
                 composable("login") { LoginScreen(onSignIn, isAuthenticating) }
@@ -1208,11 +1363,22 @@ private fun LoginScreen(onSignIn: () -> Unit, isAuthenticating: Boolean) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFFFEA654)),
+            .background(BrandColors.Orange),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         if (isAuthenticating) {
+            Image(
+                painter = painterResource(id = R.drawable.logo),
+                contentDescription = "LegacyHound Logo",
+                modifier = Modifier.size(120.dp)
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Your legacy, for generations",
+                style = MaterialTheme.typography.titleMedium,
+                color = Color.White
+            )
             CircularProgressIndicator(modifier = Modifier.size(48.dp))
             Spacer(modifier = Modifier.height(16.dp))
             Text(text = "Signing in...")
@@ -1441,15 +1607,35 @@ private fun WelcomeScreen(
     var selectedTabIndex by remember { mutableStateOf(0) }
     var showAddCollectionDialog by remember { mutableStateOf(false) }
     var refreshTrigger by remember { mutableStateOf(0) }
+    var itemsRefreshTrigger by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
+    val lifecycleOwner = LocalLifecycleOwner.current
 
-    LaunchedEffect(Unit) {
+    // Observe lifecycle to refresh items when app resumes
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                android.util.Log.d("WelcomeScreen", "App resumed, triggering items refresh")
+                // Increment trigger to force refresh via LaunchedEffect
+                itemsRefreshTrigger++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    LaunchedEffect(itemsRefreshTrigger) {
         isLoadingItems = true
         items = fetchLatestItems(activity)
         isLoadingItems = false
+        android.util.Log.d("WelcomeScreen", "Items loaded: ${items.size}")
         
-        // Fetch user plan data (with caching)
-        userPlan = activity.getCachedUserPlan()
+        // Fetch user plan data only on first load (when trigger is 0)
+        if (itemsRefreshTrigger == 0) {
+            userPlan = activity.getCachedUserPlan()
+        }
     }
 
     LaunchedEffect(refreshTrigger) {
@@ -1472,15 +1658,18 @@ private fun WelcomeScreen(
     val pullRefreshState = rememberPullToRefreshState()
 
     if (pullRefreshState.isRefreshing) {
-        LaunchedEffect(true) {
+        LaunchedEffect(Unit) {
+            android.util.Log.d("WelcomeScreen", "Pull to refresh triggered")
             if (selectedTabIndex == 0) {
                 isLoadingItems = true
                 items = fetchLatestItems(activity)
                 isLoadingItems = false
+                android.util.Log.d("WelcomeScreen", "Items refreshed via pull: ${items.size}")
             } else {
                 isLoadingCollections = true
                 collections = fetchCollections(activity)
                 isLoadingCollections = false
+                android.util.Log.d("WelcomeScreen", "Collections refreshed via pull: ${collections.size}")
             }
             pullRefreshState.endRefresh()
         }
@@ -1510,14 +1699,14 @@ private fun WelcomeScreen(
                         Icon(
                             imageVector = Icons.Filled.Info,
                             contentDescription = "Help",
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = Color.Black
                         )
                     }
                     IconButton(onClick = onSettings) {
                         Icon(
                             imageVector = Icons.Filled.Settings,
                             contentDescription = "Settings",
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = Color.Black
                         )
                     }
                 }
@@ -1556,12 +1745,12 @@ private fun WelcomeScreen(
                 Tab(
                     selected = selectedTabIndex == 0,
                     onClick = { selectedTabIndex = 0 },
-                    text = { Text("Recent Items") }
+                    text = { Text("Recent Items", color = Color.Black) }
                 )
                 Tab(
                     selected = selectedTabIndex == 1,
                     onClick = { selectedTabIndex = 1 },
-                    text = { Text("Collections") }
+                    text = { Text("Collections", color = Color.Black) }
                 )
             }
 
@@ -1684,7 +1873,7 @@ private fun AddCollectionDialog(
     )
 }
 
-@OptIn(androidx.media3.common.util.UnstableApi::class)
+@OptIn(androidx.media3.common.util.UnstableApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun ItemFormScreen(
     onSave: (String, Uri?) -> Unit,
@@ -1704,11 +1893,22 @@ private fun ItemFormScreen(
     var amplitudes by remember { mutableStateOf(listOf<Float>()) }
     var recordingTimeSeconds by remember { mutableStateOf(0) }
     var userPlan by remember { mutableStateOf<UserPlanData?>(null) }
+    var collections by remember { mutableStateOf<List<CollectionData>>(emptyList()) }
+    var selectedCollectionId by rememberSaveable { mutableStateOf(passedCollectionId ?: collectionIdProvider()) }
+    var isLoadingCollections by remember { mutableStateOf(false) }
+    var isSaving by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     
     // Fetch user plan to determine recording time limit (with caching)
     LaunchedEffect(Unit) {
         userPlan = activity.getCachedUserPlan()
+        isLoadingCollections = true
+        collections = fetchCollections(activity)
+        isLoadingCollections = false
+        // Set initial selection if not already set
+        if (selectedCollectionId == null && collections.isNotEmpty()) {
+            selectedCollectionId = collections.first().id
+        }
     }
     
     // Determine max recording time based on plan (25s for free, 60s for others)
@@ -1884,357 +2084,489 @@ private fun ItemFormScreen(
         onCancel()
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.Top,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // In-app CameraX overlay
+    Box(modifier = Modifier.fillMaxSize()) {
+        // In-app CameraX full-screen overlay
         if (showCamera) {
             val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
             val context = androidx.compose.ui.platform.LocalContext.current
             val mainExecutor = androidx.core.content.ContextCompat.getMainExecutor(context)
-            androidx.compose.ui.viewinterop.AndroidView(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                factory = { ctx ->
-                    val previewView = androidx.camera.view.PreviewView(ctx).apply {
-                        layoutParams = android.view.ViewGroup.LayoutParams(
-                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                            android.view.ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                    }
-                    val cameraProviderFuture = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(ctx)
-                    cameraProviderFuture.addListener({
-                        try {
-                            val cameraProvider = cameraProviderFuture.get()
-                            val preview = androidx.camera.core.Preview.Builder().build().apply {
-                                setSurfaceProvider(previewView.surfaceProvider)
-                            }
-                            val imgCapture = androidx.camera.core.ImageCapture.Builder()
-                                .setCaptureMode(androidx.camera.core.ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                                .build()
-                            imageCapture = imgCapture
-                            val selector = androidx.camera.core.CameraSelector.DEFAULT_BACK_CAMERA
-                            cameraProvider.unbindAll()
-                            cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, imgCapture)
-                        } catch (e: Exception) {
-                            android.util.Log.e("CameraX", "Binding failed", e)
-                            Toast.makeText(context, "Camera error", Toast.LENGTH_SHORT).show()
-                            showCamera = false
-                        }
-                    }, mainExecutor)
-                    previewView
-                }
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Button(onClick = { showCamera = false }) { Text("Cancel") }
-                Button(onClick = {
-                    val resolver = activity.contentResolver
-                    val name = "photo_" + System.currentTimeMillis() + ".jpg"
-                    val values = android.content.ContentValues().apply {
-                        put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
-                        put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                    }
-                    val options = androidx.camera.core.ImageCapture.OutputFileOptions.Builder(
-                        resolver,
-                        android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                        values
-                    ).build()
-                    val capture = imageCapture
-                    if (capture == null) {
-                        Toast.makeText(activity, "Camera not ready", Toast.LENGTH_SHORT).show()
-                        return@Button
-                    }
-                    capture.takePicture(options, mainExecutor, object: androidx.camera.core.ImageCapture.OnImageSavedCallback {
-                        override fun onError(exception: androidx.camera.core.ImageCaptureException) {
-                            android.util.Log.e("CameraX", "Capture error", exception)
-                            Toast.makeText(activity, "Failed to capture photo", Toast.LENGTH_SHORT).show()
-                        }
-                        override fun onImageSaved(outputFileResults: androidx.camera.core.ImageCapture.OutputFileResults) {
-                            val savedUri = outputFileResults.savedUri
-                            imageUri = savedUri
-                            showCamera = false
-                            android.util.Log.d("CameraX", "Saved image: $savedUri")
-                        }
-                    })
-                }) { Text("Capture") }
-            }
-        }
-
-        if (!showCamera) {
-            Text(text = "Add New Item", style = MaterialTheme.typography.headlineMedium)
             
-            // Step 1: Photo
-            Text(
-                text = "Step 1: Add Photo",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(top = 24.dp, bottom = 8.dp)
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Button(
-                    onClick = {
-                        val hasCam = androidx.core.content.ContextCompat.checkSelfPermission(
-                            activity, android.Manifest.permission.CAMERA
-                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                        if (hasCam) {
-                            showCamera = true
-                        } else {
-                            requestCameraPermission.launch(android.Manifest.permission.CAMERA)
+            Box(modifier = Modifier.fillMaxSize()) {
+                // Camera preview takes full screen
+                androidx.compose.ui.viewinterop.AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        val previewView = androidx.camera.view.PreviewView(ctx).apply {
+                            layoutParams = android.view.ViewGroup.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                            )
                         }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Take Photo")
-                }
-                Button(
-                    onClick = { pickImageLauncher.launch("image/*") },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(if (imageUri != null) "Change Photo" else "Pick Photo")
-                }
-            }
-        }
-        
-        // Image preview
-        if (!showCamera && imageUri != null) {
-            Box(
-                modifier = Modifier
-                    .padding(top = 16.dp)
-                    .fillMaxWidth()
-            ) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(200.dp)
-                ) {
-                    val activity = LocalContext.current as ComposeMainActivity
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current)
-                            .data(imageUri)
-                            .crossfade(true)
-                            .memoryCachePolicy(CachePolicy.ENABLED)
-                            .diskCachePolicy(CachePolicy.ENABLED)
-                            .build(),
-                        imageLoader = activity.imageLoader,
-                        contentDescription = "Item image",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                }
-                // Remove button
-                IconButton(
-                    onClick = { imageUri = null },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Close,
-                        contentDescription = "Remove photo",
-                        tint = Color.White,
-                        modifier = Modifier
-                            .size(32.dp)
-                            .padding(4.dp)
-                    )
-                }
-            }
-        }
-        
-        // Step 2: Audio
-        Text(
-            text = "Step 2: Record Audio",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(top = 24.dp, bottom = 8.dp)
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Button(onClick = {
-                if (isRecording) stopRecording() else startRecording()
-            }) {
-                Text(
-                    when {
-                        isRecording -> "Stop Recording"
-                        audioUri != null -> "Re-record Audio"
-                        else -> "Record Audio"
+                        val cameraProviderFuture = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(ctx)
+                        cameraProviderFuture.addListener({
+                            try {
+                                val cameraProvider = cameraProviderFuture.get()
+                                val preview = androidx.camera.core.Preview.Builder().build().apply {
+                                    setSurfaceProvider(previewView.surfaceProvider)
+                                }
+                                // Force portrait orientation since app is locked to portrait mode
+                                val imgCapture = androidx.camera.core.ImageCapture.Builder()
+                                    .setCaptureMode(androidx.camera.core.ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                                    .setTargetRotation(android.view.Surface.ROTATION_0)
+                                    .build()
+                                imageCapture = imgCapture
+                                val selector = androidx.camera.core.CameraSelector.DEFAULT_BACK_CAMERA
+                                cameraProvider.unbindAll()
+                                cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, imgCapture)
+                            } catch (e: Exception) {
+                                android.util.Log.e("CameraX", "Binding failed", e)
+                                Toast.makeText(context, "Camera error", Toast.LENGTH_SHORT).show()
+                                showCamera = false
+                            }
+                        }, mainExecutor)
+                        previewView
                     }
                 )
-            }
-            if (audioUri != null && !isRecording) {
-                Text(text = "Audio attached", style = MaterialTheme.typography.bodySmall)
-                IconButton(onClick = { audioUri = null }) {
-                    Icon(imageVector = Icons.Filled.Close, contentDescription = "Remove audio")
+                
+                // Buttons overlaid at bottom
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.BottomCenter)
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)
+                ) {
+                    Button(onClick = { showCamera = false }) { Text("Cancel") }
+                    Button(onClick = {
+                        val resolver = activity.contentResolver
+                        val name = "photo_" + System.currentTimeMillis() + ".jpg"
+                        val values = android.content.ContentValues().apply {
+                            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                        }
+                        val options = androidx.camera.core.ImageCapture.OutputFileOptions.Builder(
+                            resolver,
+                            android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                            values
+                        ).build()
+                        val capture = imageCapture
+                        if (capture == null) {
+                            Toast.makeText(activity, "Camera not ready", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+                        capture.takePicture(options, mainExecutor, object: androidx.camera.core.ImageCapture.OnImageSavedCallback {
+                            override fun onError(exception: androidx.camera.core.ImageCaptureException) {
+                                android.util.Log.e("CameraX", "Capture error", exception)
+                                Toast.makeText(activity, "Failed to capture photo", Toast.LENGTH_SHORT).show()
+                            }
+                            override fun onImageSaved(outputFileResults: androidx.camera.core.ImageCapture.OutputFileResults) {
+                                val savedUri = outputFileResults.savedUri
+                                imageUri = savedUri
+                                showCamera = false
+                                android.util.Log.d("CameraX", "Saved image: $savedUri")
+                            }
+                        })
+                    }) { Text("Capture") }
                 }
             }
         }
-
-        // Waveform visualization during recording
-        if (isRecording) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Card(
+        
+        // Main form content
+        if (!showCamera) {
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(80.dp)
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.Top,
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Box(
+                // Header with back button and title
+                Row(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .padding(8.dp),
-                    contentAlignment = Alignment.Center
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val barWidth = 4.dp.toPx()
-                        val barSpacing = 2.dp.toPx()
-                        val totalBarWidth = barWidth + barSpacing
-                        val maxBars = (size.width / totalBarWidth).toInt()
-                        val displayAmplitudes = amplitudes.takeLast(maxBars)
-                        
-                        displayAmplitudes.forEachIndexed { index, amplitude ->
-                            val barHeight = (amplitude * size.height * 0.8f).coerceAtLeast(4.dp.toPx())
-                            val x = size.width - (displayAmplitudes.size - index) * totalBarWidth
-                            val y = (size.height - barHeight) / 2
-                            
-                            drawRect(
-                                color = androidx.compose.ui.graphics.Color(0xFF2196F3),
-                                topLeft = androidx.compose.ui.geometry.Offset(x, y),
-                                size = androidx.compose.ui.geometry.Size(barWidth, barHeight)
+                    androidx.compose.material3.TextButton(onClick = onCancel) {
+                        Text("< Back", color = Color.Black)
+                    }
+                    Text(
+                        text = "Add New Item",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = Color.Black
+                    )
+                    // Spacer to balance the layout
+                    Spacer(modifier = Modifier.width(48.dp))
+                }
+                
+                // Step 1: Photo
+                Text(
+                    text = "Step 1: Add Photo",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.Black,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 24.dp, bottom = 8.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Start
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            val hasCam = androidx.core.content.ContextCompat.checkSelfPermission(
+                                activity, android.Manifest.permission.CAMERA
+                            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                            if (hasCam) {
+                                showCamera = true
+                            } else {
+                                requestCameraPermission.launch(android.Manifest.permission.CAMERA)
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Take Photo")
+                    }
+                    Button(
+                        onClick = { pickImageLauncher.launch("image/*") },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(if (imageUri != null) "Change Photo" else "Pick Photo")
+                    }
+                }
+                
+                // Image preview
+                if (imageUri != null) {
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 16.dp)
+                            .fillMaxWidth()
+                    ) {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(200.dp)
+                        ) {
+                            val activity = LocalContext.current as ComposeMainActivity
+                            AsyncImage(
+                                model = ImageRequest.Builder(LocalContext.current)
+                                    .data(imageUri)
+                                    .crossfade(true)
+                                    .memoryCachePolicy(CachePolicy.ENABLED)
+                                    .diskCachePolicy(CachePolicy.ENABLED)
+                                    .build(),
+                                imageLoader = activity.imageLoader,
+                                contentDescription = "Item image",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+                        // Remove button
+                        IconButton(
+                            onClick = { imageUri = null },
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Close,
+                                contentDescription = "Remove photo",
+                                tint = Color.White,
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .padding(4.dp)
                             )
                         }
                     }
-                    // Recording timer overlay
+                }
+                
+                // Step 2: Audio
+                Text(
+                    text = "Step 2: Record Audio Description",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.Black,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 24.dp, bottom = 8.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Start
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Button(onClick = {
+                        if (isRecording) stopRecording() else startRecording()
+                    }) {
+                        Text(
+                            when {
+                                isRecording -> "Stop Recording"
+                                audioUri != null -> "Re-record Audio"
+                                else -> "Record Audio"
+                            }
+                        )
+                    }
+                    if (audioUri != null && !isRecording) {
+                        Text(text = "Audio attached", style = MaterialTheme.typography.bodySmall)
+                        IconButton(onClick = { audioUri = null }) {
+                            Icon(imageVector = Icons.Filled.Close, contentDescription = "Remove audio")
+                        }
+                    }
+                }
+
+                // Waveform visualization during recording
+                if (isRecording) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(80.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Canvas(modifier = Modifier.fillMaxSize()) {
+                                val barWidth = 4.dp.toPx()
+                                val barSpacing = 2.dp.toPx()
+                                val totalBarWidth = barWidth + barSpacing
+                                val maxBars = (size.width / totalBarWidth).toInt()
+                                val displayAmplitudes = amplitudes.takeLast(maxBars)
+                                
+                                displayAmplitudes.forEachIndexed { index, amplitude ->
+                                    val barHeight = (amplitude * size.height * 0.8f).coerceAtLeast(4.dp.toPx())
+                                    val x = size.width - (displayAmplitudes.size - index) * totalBarWidth
+                                    val y = (size.height - barHeight) / 2
+                                    
+                                    drawRect(
+                                        color = androidx.compose.ui.graphics.Color(0xFF2196F3),
+                                        topLeft = androidx.compose.ui.geometry.Offset(x, y),
+                                        size = androidx.compose.ui.geometry.Size(barWidth, barHeight)
+                                    )
+                                }
+                            }
+                            // Recording timer overlay
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                val remainingSeconds = maxRecordingSeconds - recordingTimeSeconds
+                                Text(
+                                    text = String.format("%d:%02d", remainingSeconds / 60, remainingSeconds % 60),
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    color = if (remainingSeconds <= 5) Color.Red else MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.background(
+                                        color = Color.White.copy(alpha = 0.8f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ).padding(horizontal = 12.dp, vertical = 4.dp)
+                                )
+                                Text(
+                                    text = "remaining",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.background(
+                                        color = Color.White.copy(alpha = 0.8f),
+                                        shape = RoundedCornerShape(4.dp)
+                                    ).padding(horizontal = 8.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Audio preview (ExoPlayer) when an audio file is attached and not currently recording
+                if (audioUri != null && !isRecording) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(80.dp)
+                    ) {
+                        val context = LocalContext.current
+                        // Rebuild player when audioUri changes
+                        val exoPlayer = remember(audioUri) {
+                            ExoPlayer.Builder(context).build().apply {
+                                try {
+                                    setMediaItem(MediaItem.fromUri(audioUri!!))
+                                    prepare()
+                                } catch (e: Exception) {
+                                    android.util.Log.e("AudioPreview", "Failed to prepare player", e)
+                                }
+                            }
+                        }
+                        DisposableEffect(exoPlayer) {
+                            onDispose {
+                                try { exoPlayer.release() } catch (_: Exception) {}
+                            }
+                        }
+                        AndroidView(
+                            factory = { ctx ->
+                                PlayerView(ctx).apply {
+                                    useController = true
+                                    player = exoPlayer
+                                    controllerAutoShow = true
+                                    setShowRewindButton(true)
+                                    setShowFastForwardButton(true)
+                                }
+                            },
+                            update = { view -> view.player = exoPlayer },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+                
+                // Step 3: Select Collection
+                Text(
+                    text = "Step 3: Select Collection",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.Black,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 24.dp, bottom = 8.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Start
+                )
+                
+                if (isLoadingCollections) {
+                    CircularProgressIndicator(modifier = Modifier.padding(16.dp))
+                } else if (collections.isEmpty()) {
+                    Text(
+                        text = "No collections available. Please create one first.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(8.dp)
+                    )
+                } else {
+                    var expanded by remember { mutableStateOf(false) }
+                    val selectedCollection = collections.find { it.id == selectedCollectionId }
+                    
+                    ExposedDropdownMenuBox(
+                        expanded = expanded,
+                        onExpandedChange = { expanded = !expanded },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedTextField(
+                            value = selectedCollection?.name ?: "Select a collection",
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Collection") },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                            colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .menuAnchor()
+                        )
+                        ExposedDropdownMenu(
+                            expanded = expanded,
+                            onDismissRequest = { expanded = false }
+                        ) {
+                            collections.forEach { collection ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(
+                                                text = collection.name,
+                                                style = MaterialTheme.typography.bodyLarge
+                                            )
+                                            Text(
+                                                text = "${collection.numberItems} items",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = Color.Gray
+                                            )
+                                        }
+                                    },
+                                    onClick = {
+                                        selectedCollectionId = collection.id
+                                        expanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                
+                // Show spinner while saving, otherwise show buttons
+                if (isSaving) {
                     Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        val remainingSeconds = maxRecordingSeconds - recordingTimeSeconds
-                        Text(
-                            text = String.format("%d:%02d", remainingSeconds / 60, remainingSeconds % 60),
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = if (remainingSeconds <= 5) Color.Red else MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.background(
-                                color = Color.White.copy(alpha = 0.8f),
-                                shape = RoundedCornerShape(8.dp)
-                            ).padding(horizontal = 12.dp, vertical = 4.dp)
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(48.dp),
+                            color = BrandColors.Green
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "remaining",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.background(
-                                color = Color.White.copy(alpha = 0.8f),
-                                shape = RoundedCornerShape(4.dp)
-                            ).padding(horizontal = 8.dp, vertical = 2.dp)
+                            text = "Saving item...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color.Gray
                         )
                     }
+                } else {
+                    Button(
+                        onClick = {
+                            activity.lifecycleScope.launch {
+                                isSaving = true
+                                try {
+                                    if (isRecording) {
+                                        stopRecording()
+                                    }
+                                    val token = activity.getAccessToken()
+                                    if (token.isNullOrEmpty()) {
+                                        android.util.Log.w("ItemForm", "Save blocked: Not authenticated")
+                                        Toast.makeText(activity, "Not authenticated", Toast.LENGTH_SHORT).show()
+                                        return@launch
+                                    }
+                                    // Title defaults to "processing"; no validation required.
+                                    val collectionId = selectedCollectionId
+                                    if (collectionId.isNullOrEmpty()) {
+                                        android.util.Log.w("ItemForm", "Save blocked: No collectionId available")
+                                        Toast.makeText(activity, "No collection available. Please create one on the server.", Toast.LENGTH_LONG).show()
+                                        return@launch
+                                    }
+                                    val result = postItemMultipart(
+                                        resolver = activity.contentResolver,
+                                        apiBase = activity.getApiBaseUrl(),
+                                        token = token,
+                                        title = title,
+                                        imageUri = imageUri,
+                                        audioUri = audioUri,
+                                        collectionId = collectionId
+                                    )
+                                    if (result.success) {
+                                        Toast.makeText(activity, "Item saved", Toast.LENGTH_SHORT).show()
+                                        onSave(title, imageUri)
+                                    } else {
+                                        android.util.Log.e("PostItem", "Save failed: ${result.errorMessage ?: "unknown error"}")
+                                        Toast.makeText(activity, "Failed to save: ${result.errorMessage ?: "Unknown error"}", Toast.LENGTH_LONG).show()
+                                    }
+                                } finally {
+                                    isSaving = false
+                                }
+                            }
+                        },
+                        modifier = Modifier.padding(top = 24.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = BrandColors.Green,
+                            contentColor = Color.White
+                        )
+                    ) { Text("Save Item") }
+                    Button(
+                        onClick = onCancel,
+                        modifier = Modifier.padding(top = 8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = Color.White
+                        )
+                    ) { Text("Cancel") }
                 }
             }
         }
-
-        // Audio preview (ExoPlayer) when an audio file is attached and not currently recording
-        if (audioUri != null && !isRecording) {
-            Spacer(modifier = Modifier.height(12.dp))
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(80.dp)
-            ) {
-                val context = LocalContext.current
-                // Rebuild player when audioUri changes
-                val exoPlayer = remember(audioUri) {
-                    ExoPlayer.Builder(context).build().apply {
-                        try {
-                            setMediaItem(MediaItem.fromUri(audioUri!!))
-                            prepare()
-                        } catch (e: Exception) {
-                            android.util.Log.e("AudioPreview", "Failed to prepare player", e)
-                        }
-                    }
-                }
-                DisposableEffect(exoPlayer) {
-                    onDispose {
-                        try { exoPlayer.release() } catch (_: Exception) {}
-                    }
-                }
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            useController = true
-                            player = exoPlayer
-                            controllerAutoShow = true
-                            setShowRewindButton(true)
-                            setShowFastForwardButton(true)
-                        }
-                    },
-                    update = { view -> view.player = exoPlayer },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-        }
-        
-        Button(
-            onClick = {
-                activity.lifecycleScope.launch {
-                    if (isRecording) {
-                        stopRecording()
-                    }
-                    val token = activity.getAccessToken()
-                    if (token.isNullOrEmpty()) {
-                        android.util.Log.w("ItemForm", "Save blocked: Not authenticated")
-                        Toast.makeText(activity, "Not authenticated", Toast.LENGTH_SHORT).show()
-                        return@launch
-                    }
-                    // Title defaults to "processing"; no validation required.
-                    val collectionId = passedCollectionId ?: collectionIdProvider()
-                    if (collectionId.isNullOrEmpty()) {
-                        android.util.Log.w("ItemForm", "Save blocked: No collectionId available")
-                        Toast.makeText(activity, "No collection available. Please create one on the server.", Toast.LENGTH_LONG).show()
-                        return@launch
-                    }
-                    val result = postItemMultipart(
-                        resolver = activity.contentResolver,
-                        apiBase = activity.getApiBaseUrl(),
-                        token = token,
-                        title = title,
-                        imageUri = imageUri,
-                        audioUri = audioUri,
-                        collectionId = collectionId
-                    )
-                    if (result.success) {
-                        Toast.makeText(activity, "Item saved", Toast.LENGTH_SHORT).show()
-                        onSave(title, imageUri)
-                    } else {
-                        android.util.Log.e("PostItem", "Save failed: ${result.errorMessage ?: "unknown error"}")
-                        Toast.makeText(activity, "Failed to save: ${result.errorMessage ?: "Unknown error"}", Toast.LENGTH_LONG).show()
-                    }
-                }
-            },
-            modifier = Modifier.padding(top = 24.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFF4CAF50)
-            )
-        ) { Text("Save Item") }
-        Button(
-            onClick = onCancel,
-            modifier = Modifier.padding(top = 8.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.error
-            )
-        ) { Text("Cancel") }
     }
 }
 data class PostItemResult(val success: Boolean, val errorMessage: String?)
@@ -2285,7 +2617,7 @@ suspend private fun fetchLatestItems(activity: ComposeMainActivity): List<ItemDa
                     val body = conn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
                     android.util.Log.d("FetchItems", "Response body: $body")
                     val arr = try { Json.parseToJsonElement(body).jsonArray } catch (_: Exception) { null }
-                    val items = arr?.take(6)?.mapNotNull { element ->
+                    val items = arr?.take(12)?.mapNotNull { element ->
                         val obj = element.jsonObject
                         val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
                         val title = obj["title"]?.jsonPrimitive?.contentOrNull ?: "Untitled"
@@ -2892,7 +3224,9 @@ private fun ItemsGrid(items: List<ItemData>, onItemClick: (String) -> Unit) {
         contentPadding = PaddingValues(8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(600.dp)
     ) {
         items(items) { item ->
             ItemThumbnail(item = item, onClick = { onItemClick(item.id) })
