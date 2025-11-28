@@ -1536,7 +1536,7 @@ private fun HelpScreen(onBack: () -> Unit) {
         )
 
         Text(
-            text = "Check Profile → Help & Support or email mamlambofossils@gmail.com.\n\n" +
+            text = "Check Profile → Help & Support or email help@legacyhound.app.\n\n" +
                     "We're honored to help you preserve your stories.",
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.padding(bottom = 24.dp)
@@ -3110,9 +3110,15 @@ private fun CollectionGalleryScreen(
                                             val shareUrl = obj?.get("url")?.jsonPrimitive?.contentOrNull
                                             withContext(Dispatchers.Main) {
                                                 if (!shareUrl.isNullOrBlank()) {
-                                                    val clipboard = activity.getSystemService(ClipboardManager::class.java)
-                                                    clipboard?.setPrimaryClip(ClipData.newPlainText("Collection Link", shareUrl))
-                                                    Toast.makeText(activity, "Share link copied", Toast.LENGTH_SHORT).show()
+                                                    // Open Android share sheet with friendly message
+                                                    val shareText = "View my LegacyHound.app collection at:\n\n$shareUrl"
+                                                    val shareIntent = android.content.Intent().apply {
+                                                        action = android.content.Intent.ACTION_SEND
+                                                        putExtra(android.content.Intent.EXTRA_TEXT, shareText)
+                                                        type = "text/plain"
+                                                    }
+                                                    val chooser = android.content.Intent.createChooser(shareIntent, "Share Collection")
+                                                    activity.startActivity(chooser)
                                                 } else {
                                                     Toast.makeText(activity, "Failed to get link", Toast.LENGTH_LONG).show()
                                                 }
