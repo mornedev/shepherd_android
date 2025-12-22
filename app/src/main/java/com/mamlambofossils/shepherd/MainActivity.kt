@@ -1,4 +1,4 @@
-package com.mamlambofossils.legacyhound
+package com.mamlambofossils.legacyretriever
 
 import android.os.Bundle
 import com.google.android.material.snackbar.Snackbar
@@ -10,7 +10,7 @@ import androidx.navigation.ui.setupActionBarWithNavController
 import android.view.Menu
 import android.view.MenuItem
 import androidx.lifecycle.lifecycleScope
-import com.mamlambofossils.legacyhound.databinding.ActivityMainBinding
+import com.mamlambofossils.legacyretriever.databinding.ActivityMainBinding
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.gotrue.Auth
 import io.github.jan.supabase.gotrue.auth
@@ -38,7 +38,7 @@ class MainActivity : AppCompatActivity() {
             install(Auth) {
                 // Must match the intent-filter in AndroidManifest.xml
                 host = "auth"
-                scheme = "legacyshepherd"
+                scheme = "legacyretriever"
                 defaultExternalAuthAction = ExternalAuthAction.CustomTabs()
             }
         }

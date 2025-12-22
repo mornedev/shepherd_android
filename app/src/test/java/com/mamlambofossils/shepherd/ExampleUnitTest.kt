@@ -1,4 +1,4 @@
-package com.mamlambofossils.legacyhound
+package com.mamlambofossils.legacyretriever
 
 import org.junit.Test
 

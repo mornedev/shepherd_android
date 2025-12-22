@@ -1,11 +1,11 @@
-package com.mamlambofossils.legacyhound
+package com.mamlambofossils.legacyretriever
 
 import android.os.Bundle
 import androidx.fragment.app.Fragment
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import com.mamlambofossils.legacyhound.databinding.FragmentSecondBinding
+import com.mamlambofossils.legacyretriever.databinding.FragmentSecondBinding
 import androidx.lifecycle.lifecycleScope
 import androidx.appcompat.app.AlertDialog
 import android.widget.EditText

@@ -11,15 +11,15 @@ val apiBaseUrl: String = (project.findProperty("API_BASE_URL") as String?)
     ?: "https://legacyshepherd-api-601845597651.australia-southeast1.run.app"
 
 android {
-    namespace = "com.mamlambofossils.legacyhound"
+    namespace = "com.mamlambofossils.legacyretriever"
     compileSdk = 36
 
     defaultConfig {
         applicationId = "com.mamlambofossils.legacyhound"
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -48,6 +48,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Generate native debug symbols for crash reporting
+            ndk {
+                debugSymbolLevel = "FULL"
+            }
         }
     }
     compileOptions {

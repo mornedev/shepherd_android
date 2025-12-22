@@ -1,4 +1,4 @@
-package com.mamlambofossils.legacyhound
+package com.mamlambofossils.legacyretriever
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -143,7 +143,7 @@ object BrandColors {
 }
 
 // Custom color scheme with brand orange as primary
-private val LegacyHoundLightColorScheme = lightColorScheme(
+private val LegacyRetrieverLightColorScheme = lightColorScheme(
     primary = BrandColors.Orange,
     onPrimary = Color.Black,
     primaryContainer = BrandColors.Orange,
@@ -183,7 +183,7 @@ class ComposeMainActivity : ComponentActivity() {
         ) {
             install(Auth) {
                 host = "auth"
-                scheme = "legacyshepherd"
+                scheme = "legacyretriever"
                 defaultExternalAuthAction = ExternalAuthAction.CustomTabs()
                 // Enable auto-refresh (session persistence is enabled by default in supabase-kt)
                 autoSaveToStorage = true    // saves session locally
@@ -1074,7 +1074,7 @@ private fun AppNav(
     isAuthenticating: Boolean
 ) {
     MaterialTheme(
-        colorScheme = LegacyHoundLightColorScheme
+        colorScheme = LegacyRetrieverLightColorScheme
     ) {
         Scaffold { padding ->
             NavHost(navController = navController, startDestination = "login", modifier = Modifier.padding(padding)) {
@@ -1370,7 +1370,7 @@ private fun LoginScreen(onSignIn: () -> Unit, isAuthenticating: Boolean) {
         if (isAuthenticating) {
             Image(
                 painter = painterResource(id = R.drawable.logo),
-                contentDescription = "LegacyHound Logo",
+                contentDescription = "LegacyRetriever Logo",
                 modifier = Modifier.size(120.dp)
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -1385,7 +1385,7 @@ private fun LoginScreen(onSignIn: () -> Unit, isAuthenticating: Boolean) {
         } else {
             Image(
                 painter = painterResource(id = R.drawable.logo),
-                contentDescription = "LegacyHound Logo",
+                contentDescription = "LegacyRetriever Logo",
                 modifier = Modifier.size(120.dp)
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -1396,7 +1396,7 @@ private fun LoginScreen(onSignIn: () -> Unit, isAuthenticating: Boolean) {
             )
             Spacer(modifier = Modifier.height(24.dp))
             Text(
-                text = "LegacyHound",
+                text = "LegacyRetriever",
                 style = MaterialTheme.typography.headlineMedium,
                 color = Color.White
             )
@@ -1405,8 +1405,17 @@ private fun LoginScreen(onSignIn: () -> Unit, isAuthenticating: Boolean) {
                 text = "Sign in to continue",
                 color = Color.White
             )
-            Button(onClick = onSignIn, modifier = Modifier.padding(top = 16.dp)) {
-                Text("Sign in with Google")
+            Button(
+                onClick = onSignIn,
+                modifier = Modifier
+                    .padding(top = 16.dp)
+                    .padding(horizontal = 32.dp, vertical = 8.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = BrandColors.Green,
+                    contentColor = Color.White
+                )
+            ) {
+                Text("Click here to sign in with Google")
             }
         }
     }
@@ -1439,7 +1448,7 @@ private fun HelpScreen(onBack: () -> Unit) {
 
         // Welcome message
         Text(
-            text = "Welcome! LegacyVault helps you save the stories behind your most treasured items—and keep your voice with them forever.",
+            text = "Welcome! LegacyRetriever helps you save the stories behind your most treasured items—and keep your voice with them forever.",
             style = MaterialTheme.typography.bodyLarge,
             modifier = Modifier.padding(bottom = 24.dp)
         )
@@ -1536,7 +1545,7 @@ private fun HelpScreen(onBack: () -> Unit) {
         )
 
         Text(
-            text = "Check Profile → Help & Support or email help@legacyhound.app.\n\n" +
+            text = "Check Profile → Help & Support or email help@legacyretriever.app.\n\n" +
                     "We're honored to help you preserve your stories.",
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.padding(bottom = 24.dp)
@@ -1769,11 +1778,26 @@ private fun WelcomeScreen(
                     } else if (items.isNotEmpty()) {
                         ItemsGrid(items = items, onItemClick = onItemClick)
                     } else {
-                        Text(
-                            text = "You have not loaded any items yet",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(top = 24.dp)
-                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "You have not loaded any items yet",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(bottom = 36.dp)
+                            )
+                            Text(
+                                text = "Start your legacy, it only takes 30 seconds!",
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.padding(bottom = 24.dp)
+                            )
+                            Button(onClick = onAddItem) {
+                                Text("Load your first item")
+                            }
+                        }
                     }
                 }
                 1 -> {
@@ -2136,37 +2160,50 @@ private fun ItemFormScreen(
                         .padding(16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)
                 ) {
-                    Button(onClick = { showCamera = false }) { Text("Cancel") }
-                    Button(onClick = {
-                        val resolver = activity.contentResolver
-                        val name = "photo_" + System.currentTimeMillis() + ".jpg"
-                        val values = android.content.ContentValues().apply {
-                            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
-                            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                        }
-                        val options = androidx.camera.core.ImageCapture.OutputFileOptions.Builder(
-                            resolver,
-                            android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                            values
-                        ).build()
-                        val capture = imageCapture
-                        if (capture == null) {
-                            Toast.makeText(activity, "Camera not ready", Toast.LENGTH_SHORT).show()
-                            return@Button
-                        }
-                        capture.takePicture(options, mainExecutor, object: androidx.camera.core.ImageCapture.OnImageSavedCallback {
-                            override fun onError(exception: androidx.camera.core.ImageCaptureException) {
-                                android.util.Log.e("CameraX", "Capture error", exception)
-                                Toast.makeText(activity, "Failed to capture photo", Toast.LENGTH_SHORT).show()
+                    Button(
+                        onClick = {
+                            val resolver = activity.contentResolver
+                            val name = "photo_" + System.currentTimeMillis() + ".jpg"
+                            val values = android.content.ContentValues().apply {
+                                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
                             }
-                            override fun onImageSaved(outputFileResults: androidx.camera.core.ImageCapture.OutputFileResults) {
-                                val savedUri = outputFileResults.savedUri
-                                imageUri = savedUri
-                                showCamera = false
-                                android.util.Log.d("CameraX", "Saved image: $savedUri")
+                            val options = androidx.camera.core.ImageCapture.OutputFileOptions.Builder(
+                                resolver,
+                                android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                values
+                            ).build()
+                            val capture = imageCapture
+                            if (capture == null) {
+                                Toast.makeText(activity, "Camera not ready", Toast.LENGTH_SHORT).show()
+                                return@Button
                             }
-                        })
-                    }) { Text("Capture") }
+                            capture.takePicture(options, mainExecutor, object: androidx.camera.core.ImageCapture.OnImageSavedCallback {
+                                override fun onError(exception: androidx.camera.core.ImageCaptureException) {
+                                    android.util.Log.e("CameraX", "Capture error", exception)
+                                    Toast.makeText(activity, "Failed to capture photo", Toast.LENGTH_SHORT).show()
+                                }
+                                override fun onImageSaved(outputFileResults: androidx.camera.core.ImageCapture.OutputFileResults) {
+                                    val savedUri = outputFileResults.savedUri
+                                    imageUri = savedUri
+                                    showCamera = false
+                                    android.util.Log.d("CameraX", "Saved image: $savedUri")
+                                }
+                            })
+                        },
+                        modifier = Modifier.padding(horizontal = 32.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = BrandColors.Green,
+                            contentColor = Color.White
+                        )
+                    ) { Text("Capture") }
+                    Button(
+                        onClick = { showCamera = false },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = Color.White
+                        )
+                    ) { Text("Cancel") }
                 }
             }
         }
@@ -3111,7 +3148,7 @@ private fun CollectionGalleryScreen(
                                             withContext(Dispatchers.Main) {
                                                 if (!shareUrl.isNullOrBlank()) {
                                                     // Open Android share sheet with friendly message
-                                                    val shareText = "View my LegacyHound.app collection at:\n\n$shareUrl"
+                                                    val shareText = "View my LegacyRetriever.app collection at:\n\n$shareUrl"
                                                     val shareIntent = android.content.Intent().apply {
                                                         action = android.content.Intent.ACTION_SEND
                                                         putExtra(android.content.Intent.EXTRA_TEXT, shareText)
