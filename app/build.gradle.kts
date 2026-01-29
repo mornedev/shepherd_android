@@ -18,8 +18,8 @@ android {
         applicationId = "com.mamlambofossils.legacyhound"
         minSdk = 31
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 10
+        versionName = "1.27"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -109,6 +109,8 @@ dependencies {
     implementation("androidx.camera:camera-view:1.4.0")
     // ExifInterface for reading and handling image orientation metadata
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+    // Google Play Billing
+    implementation("com.android.billingclient:billing-ktx:7.0.0")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

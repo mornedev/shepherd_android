@@ -65,6 +65,7 @@ import coil.util.DebugLogger
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -157,6 +158,17 @@ class ComposeMainActivity : ComponentActivity() {
     private var planCacheTimestamp: Long = 0
     private val PLAN_CACHE_DURATION_MS = 60 * 60 * 1000L // 1 hour in milliseconds
 
+    // Billing manager for Google Play subscriptions
+    internal val billingManager by lazy {
+        BillingManager(
+            context = this,
+            purchaseTokenCallback = object : PurchaseTokenCallback {
+                override suspend fun getApiBaseUrl(): String = this@ComposeMainActivity.getApiBaseUrl()
+                override suspend fun getAccessToken(): String? = this@ComposeMainActivity.getAccessToken()
+            }
+        )
+    }
+
     // Configure Coil ImageLoader with aggressive caching
     internal val imageLoader by lazy {
         ImageLoader.Builder(this)
@@ -227,6 +239,8 @@ class ComposeMainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Initialize billing manager
+        billingManager.initialize()
         // Handle OAuth/OTP deep links from Supabase
         android.util.Log.d("AuthFlow", "onCreate called with intent: ${intent?.data}")
         lifecycleScope.launch {
@@ -424,6 +438,7 @@ class ComposeMainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        billingManager.destroy()
         android.util.Log.d("ActivityLifecycle", "onDestroy called")
     }
 }
@@ -1148,7 +1163,10 @@ private fun AppNav(
                     HelpScreen(onBack = { navController.popBackStack() })
                 }
                 composable("settings") {
-                    SettingsScreen(onBack = { navController.popBackStack() })
+                    SettingsScreen(
+                        onBack = { navController.popBackStack() },
+                        onUpgradePlan = { navController.navigate("upgrade-plan") }
+                    )
                 }
                 composable("upgrade-plan") {
                     UpgradePlanScreen(onBack = { navController.popBackStack() })
@@ -1159,7 +1177,7 @@ private fun AppNav(
 }
 
 @Composable
-private fun SettingsScreen(onBack: () -> Unit) {
+private fun SettingsScreen(onBack: () -> Unit, onUpgradePlan: () -> Unit) {
     val activity = LocalContext.current as ComposeMainActivity
     val scope = rememberCoroutineScope()
     var showConfirmDialog by remember { mutableStateOf(false) }
@@ -1227,6 +1245,18 @@ private fun SettingsScreen(onBack: () -> Unit) {
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = onUpgradePlan,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = BrandColors.Orange
+                            )
+                        ) {
+                            Text(
+                                text = if (userPlan!!.planId == "free") "Upgrade Plan" else "Manage Plan"
+                            )
+                        }
                     } else {
                         Text(
                             text = "Unable to load plan information",
@@ -1282,6 +1312,15 @@ private fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text(
+            text = "Version ${BuildConfig.VERSION_NAME}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.fillMaxWidth()
+        )
     }
     
     // Confirmation dialog
@@ -1320,11 +1359,144 @@ private fun SettingsScreen(onBack: () -> Unit) {
     }
 }
 
+data class SubscriptionTier(
+    val id: String,
+    val name: String,
+    val price: String,
+    val itemLimit: String,
+    val features: List<String>,
+    val isPopular: Boolean = false,
+    val isCurrent: Boolean = false
+)
+
 @Composable
 private fun UpgradePlanScreen(onBack: () -> Unit) {
+    val activity = LocalContext.current as ComposeMainActivity
+    val scope = rememberCoroutineScope()
+    var currentPlan by remember { mutableStateOf<String?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+    var subscriptionProducts by remember { mutableStateOf<List<SubscriptionProduct>>(emptyList()) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    val activePurchases by activity.billingManager.activePurchases.collectAsState()
+    val billingState by activity.billingManager.billingState.collectAsState()
+    
+    // Fetch current plan and products
+    LaunchedEffect(Unit) {
+        val planData = activity.getCachedUserPlan()
+        currentPlan = planData?.planId
+        
+        // Query subscription products from Google Play
+        subscriptionProducts = activity.billingManager.querySubscriptionProducts()
+        isLoading = false
+    }
+    
+    // Handle billing state changes
+    LaunchedEffect(billingState) {
+        when (val state = billingState) {
+            is BillingState.PurchaseSuccess -> {
+                Toast.makeText(
+                    activity,
+                    "Subscription activated successfully!",
+                    Toast.LENGTH_LONG
+                ).show()
+                // Clear plan cache to force refresh
+                activity.clearPlanCache()
+                // Refresh plan data
+                currentPlan = activity.getCachedUserPlan()?.planId
+            }
+            is BillingState.Error -> {
+                if (state.message != "Purchase canceled") {
+                    errorMessage = state.message
+                }
+            }
+            else -> {}
+        }
+    }
+    
+    // Map product IDs to tier info
+    fun getTierInfo(productId: String): Triple<String, String, List<String>> {
+        return when (productId) {
+            BillingManager.PRODUCT_STARTER -> Triple(
+                "50 items",
+                "Starter",
+                listOf(
+                    "Up to 50 items",
+                    "High-quality photo storage",
+                    "5 photos per item",
+                    "30 second audio recordings",
+                    "5 collections"
+                )
+            )
+            BillingManager.PRODUCT_STANDARD -> Triple(
+                "200 items",
+                "Standard",
+                listOf(
+                    "Up to 200 items",
+                    "High-quality photo storage",
+                    "45 second audio recordings",
+                    "20 collections",
+                    "Priority support"
+                )
+            )
+            BillingManager.PRODUCT_PREMIUM -> Triple(
+                "Unlimited items",
+                "Premium",
+                listOf(
+                    "2000 items",
+                    "High-quality photo storage",
+                    "1 minute audio recordings",
+                    "Unlimited collections",
+                    "Share collections",
+                    "Priority support",
+                    "Advanced organization",
+                    "Export & backup tools",
+                    "Premium support"
+                )
+            )
+            else -> Triple("Unknown", "Unknown", emptyList())
+        }
+    }
+    
+    val subscriptionTiers = buildList {
+        // Always add Free tier
+        add(
+            SubscriptionTier(
+                id = "free",
+                name = "Free",
+                price = "$0",
+                itemLimit = "15 items",
+                features = listOf(
+                    "Up to 15 items",
+                    "Standard resolution photo storage",
+                    "1 photo per item",
+                    "15 second audio recordings",
+                    "1 collection"
+                ),
+                isCurrent = currentPlan == "free" && activePurchases.isEmpty()
+            )
+        )
+        
+        // Add products from Google Play
+        subscriptionProducts.forEach { product ->
+            val (itemLimit, tierName, features) = getTierInfo(product.productId)
+            add(
+                SubscriptionTier(
+                    id = product.productId,
+                    name = tierName,
+                    price = product.price,
+                    itemLimit = itemLimit,
+                    features = features,
+                    isPopular = product.productId == BillingManager.PRODUCT_STANDARD,
+                    isCurrent = activePurchases.contains(product.productId)
+                )
+            )
+        }
+    }
+    
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
         // Header with back button
@@ -1336,24 +1508,221 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
                 Text("< Back")
             }
             Text(
-                text = "Upgrade Plan",
+                text = "Choose Your Plan",
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.weight(1f)
             )
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(8.dp))
+        
+        Text(
+            text = "Select the plan that best fits your needs",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 24.dp)
+        )
 
-        // Placeholder content
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
+        if (isLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(200.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator()
+            }
+        } else {
+            // Error message if any
+            errorMessage?.let { error ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Text(
+                        text = error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(16.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+            
+            // Subscription cards
+            subscriptionTiers.forEach { tier ->
+                SubscriptionCard(
+                    tier = tier,
+                    onSelect = {
+                        if (tier.id == "free") {
+                            Toast.makeText(
+                                activity,
+                                "You're already on the free plan",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            // Find the product and launch purchase flow
+                            val product = subscriptionProducts.find { it.productId == tier.id }
+                            if (product != null) {
+                                activity.billingManager.launchPurchaseFlow(activity, product)
+                            } else {
+                                Toast.makeText(
+                                    activity,
+                                    "Product not available",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    }
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        // Additional info
+        Text(
+            text = "All plans include:",
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            text = "• Secure cloud storage\n• Audio transcription\n• Collection sharing\n• Cross-device sync\n• Cancel anytime",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun SubscriptionCard(
+    tier: SubscriptionTier,
+    onSelect: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (tier.isPopular) 
+                MaterialTheme.colorScheme.primaryContainer 
+            else 
+                MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = if (tier.isPopular) 8.dp else 2.dp
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp)
         ) {
+            // Header with name and popular badge
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = tier.name,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = if (tier.isPopular) 
+                        MaterialTheme.colorScheme.onPrimaryContainer 
+                    else 
+                        MaterialTheme.colorScheme.onSurface
+                )
+                if (tier.isPopular) {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = BrandColors.Orange
+                        )
+                    ) {
+                        Text(
+                            text = "POPULAR",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            // Price
+            Row(
+                verticalAlignment = Alignment.Bottom
+            ) {
+                Text(
+                    text = tier.price,
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = if (tier.isPopular) 
+                        MaterialTheme.colorScheme.onPrimaryContainer 
+                    else 
+                        MaterialTheme.colorScheme.onSurface
+                )
+                if (tier.price != "$0") {
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(4.dp))
+            
             Text(
-                text = "Upgrade plan options coming soon...",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                text = tier.itemLimit,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (tier.isPopular) 
+                    MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                else 
+                    MaterialTheme.colorScheme.onSurfaceVariant
             )
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // Features list
+            tier.features.forEach { feature ->
+                Row(
+                    modifier = Modifier.padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = null,
+                        tint = BrandColors.Green,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = feature,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (tier.isPopular) 
+                            MaterialTheme.colorScheme.onPrimaryContainer 
+                        else 
+                            MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // Select button
+            Button(
+                onClick = onSelect,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !tier.isCurrent,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (tier.isPopular) 
+                        BrandColors.Orange 
+                    else 
+                        MaterialTheme.colorScheme.primary,
+                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Text(
+                    text = if (tier.isCurrent) "Current Plan" else "Select ${tier.name}",
+                    style = MaterialTheme.typography.labelLarge
+                )
+            }
         }
     }
 }
