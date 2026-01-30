@@ -214,17 +214,17 @@ class ComposeMainActivity : ComponentActivity() {
         
         // Check if cache is valid (within 1 hour)
         if (cachedUserPlan != null && (currentTime - planCacheTimestamp) < PLAN_CACHE_DURATION_MS) {
-            android.util.Log.d("UserPlanCache", "Returning cached plan: ${cachedUserPlan?.planId}")
+            android.util.Log.d("UserPlanCache", "Returning cached plan: planId=${cachedUserPlan?.planId}, managedBy='${cachedUserPlan?.managedBy}', planName='${cachedUserPlan?.planName}', itemsLimit=${cachedUserPlan?.numberItemsLimit}, totalItems=${cachedUserPlan?.totalItems}")
             return cachedUserPlan
         }
         
-        // Cache expired or doesn't exist, fetch new data
+        // Cache expired or empty, fetching new plan
         android.util.Log.d("UserPlanCache", "Cache expired or empty, fetching new plan")
         val freshPlan = fetchUserPlan(this)
         if (freshPlan != null) {
             cachedUserPlan = freshPlan
             planCacheTimestamp = currentTime
-            android.util.Log.d("UserPlanCache", "Cached new plan: ${freshPlan.planId}")
+            android.util.Log.d("UserPlanCache", "Cached new plan: planId=${freshPlan.planId}, managedBy='${freshPlan.managedBy}', planName='${freshPlan.planName}', itemsLimit=${freshPlan.numberItemsLimit}, totalItems=${freshPlan.totalItems}")
         }
         return freshPlan
     }
@@ -1373,7 +1373,7 @@ data class SubscriptionTier(
 private fun UpgradePlanScreen(onBack: () -> Unit) {
     val activity = LocalContext.current as ComposeMainActivity
     val scope = rememberCoroutineScope()
-    var currentPlan by remember { mutableStateOf<String?>(null) }
+    var userPlanData by remember { mutableStateOf<UserPlanData?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var subscriptionProducts by remember { mutableStateOf<List<SubscriptionProduct>>(emptyList()) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -1382,8 +1382,10 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
     
     // Fetch current plan and products
     LaunchedEffect(Unit) {
+        // Clear cache to force fresh fetch with managed_by field
+        activity.clearPlanCache()
         val planData = activity.getCachedUserPlan()
-        currentPlan = planData?.planId
+        userPlanData = planData
         
         // Query subscription products from Google Play
         subscriptionProducts = activity.billingManager.querySubscriptionProducts()
@@ -1402,7 +1404,7 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
                 // Clear plan cache to force refresh
                 activity.clearPlanCache()
                 // Refresh plan data
-                currentPlan = activity.getCachedUserPlan()?.planId
+                userPlanData = activity.getCachedUserPlan()
             }
             is BillingState.Error -> {
                 if (state.message != "Purchase canceled") {
@@ -1410,6 +1412,16 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
                 }
             }
             else -> {}
+        }
+    }
+    
+    // Map Google Play product IDs to API plan UUIDs
+    fun getApiPlanId(productId: String): String {
+        return when (productId) {
+            BillingManager.PRODUCT_STARTER -> "fafedebf-6032-4b8f-a3df-abf145091c6f"
+            BillingManager.PRODUCT_STANDARD -> "d9ae7833-2266-4c9e-baa8-2d3b683c860d"
+            BillingManager.PRODUCT_PREMIUM -> "64fd5ad8-58f9-4189-8dc7-96ab3b743308"
+            else -> productId
         }
     }
     
@@ -1457,39 +1469,117 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
         }
     }
     
+    // Debug logging
+    val currentPlan = userPlanData?.planId
+    val managedBy = userPlanData?.managedBy
+    android.util.Log.d("UpgradePlanScreen", "=== PLAN MANAGEMENT DEBUG ===")
+    android.util.Log.d("UpgradePlanScreen", "currentPlan from API: $currentPlan")
+    android.util.Log.d("UpgradePlanScreen", "managedBy from API: '$managedBy'")
+    android.util.Log.d("UpgradePlanScreen", "managedBy type: ${managedBy?.javaClass?.simpleName}")
+    android.util.Log.d("UpgradePlanScreen", "managedBy isNull: ${managedBy == null}")
+    android.util.Log.d("UpgradePlanScreen", "managedBy isEmpty: ${managedBy?.isEmpty()}")
+    android.util.Log.d("UpgradePlanScreen", "managedBy isBlank: ${managedBy?.isBlank()}")
+    
+    // Check if plans can be managed here (only if managed_by is empty or "google")
+    val canManagePlans = managedBy.isNullOrEmpty() || managedBy.lowercase() == "google"
+    android.util.Log.d("UpgradePlanScreen", "canManagePlans result: $canManagePlans")
+    android.util.Log.d("UpgradePlanScreen", "=== END DEBUG ===")
+    android.util.Log.d("UpgradePlanScreen", "")
+    
     val subscriptionTiers = buildList {
-        // Always add Free tier
-        add(
-            SubscriptionTier(
-                id = "free",
-                name = "Free",
-                price = "$0",
-                itemLimit = "15 items",
-                features = listOf(
-                    "Up to 15 items",
-                    "Standard resolution photo storage",
-                    "1 photo per item",
-                    "15 second audio recordings",
-                    "1 collection"
-                ),
-                isCurrent = currentPlan == "free" && activePurchases.isEmpty()
-            )
-        )
-        
-        // Add products from Google Play
-        subscriptionProducts.forEach { product ->
-            val (itemLimit, tierName, features) = getTierInfo(product.productId)
+        if (canManagePlans) {
+            // Always add Free tier
             add(
                 SubscriptionTier(
-                    id = product.productId,
-                    name = tierName,
-                    price = product.price,
-                    itemLimit = itemLimit,
-                    features = features,
-                    isPopular = product.productId == BillingManager.PRODUCT_STANDARD,
-                    isCurrent = activePurchases.contains(product.productId)
+                    id = "free",
+                    name = "Free",
+                    price = "$0",
+                    itemLimit = "15 items",
+                    features = listOf(
+                        "Up to 15 items",
+                        "Standard resolution photo storage",
+                        "1 photo per item",
+                        "15 second audio recordings",
+                        "1 collection"
+                    ),
+                    isCurrent = currentPlan == "5019a2e2-bf60-451f-ad5b-5066c4065dd5"
                 )
             )
+            
+            // Add products from Google Play in specific order: Starter, Standard, Premium
+            val orderedProductIds = listOf(
+                BillingManager.PRODUCT_STARTER,
+                BillingManager.PRODUCT_STANDARD,
+                BillingManager.PRODUCT_PREMIUM
+            )
+            
+            orderedProductIds.forEach { productId ->
+                val product = subscriptionProducts.find { it.productId == productId }
+                if (product != null) {
+                    val (itemLimit, tierName, features) = getTierInfo(product.productId)
+                    val apiPlanId = getApiPlanId(product.productId)
+                    add(
+                        SubscriptionTier(
+                            id = product.productId,
+                            name = tierName,
+                            price = product.price,
+                            itemLimit = itemLimit,
+                            features = features,
+                            isPopular = product.productId == BillingManager.PRODUCT_STANDARD,
+                            isCurrent = currentPlan == apiPlanId
+                        )
+                    )
+                }
+            }
+        } else {
+            // Only show current plan when managed externally
+            if (currentPlan != null) {
+                // Check if current plan is Free
+                if (currentPlan == "5019a2e2-bf60-451f-ad5b-5066c4065dd5") {
+                    add(
+                        SubscriptionTier(
+                            id = "free",
+                            name = "Free",
+                            price = "$0",
+                            itemLimit = "15 items",
+                            features = listOf(
+                                "Up to 15 items",
+                                "Standard resolution photo storage",
+                                "1 photo per item",
+                                "15 second audio recordings",
+                                "1 collection"
+                            ),
+                            isCurrent = true
+                        )
+                    )
+                } else {
+                    // Find matching paid plan
+                    val orderedProductIds = listOf(
+                        BillingManager.PRODUCT_STARTER,
+                        BillingManager.PRODUCT_STANDARD,
+                        BillingManager.PRODUCT_PREMIUM
+                    )
+                    
+                    orderedProductIds.forEach { productId ->
+                        val apiPlanId = getApiPlanId(productId)
+                        if (currentPlan == apiPlanId) {
+                            val product = subscriptionProducts.find { it.productId == productId }
+                            val (itemLimit, tierName, features) = getTierInfo(productId)
+                            add(
+                                SubscriptionTier(
+                                    id = productId,
+                                    name = tierName,
+                                    price = product?.price ?: "N/A",
+                                    itemLimit = itemLimit,
+                                    features = features,
+                                    isPopular = false,
+                                    isCurrent = true
+                                )
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
     
@@ -1516,12 +1606,14 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
 
         Spacer(modifier = Modifier.height(8.dp))
         
-        Text(
-            text = "Select the plan that best fits your needs",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 24.dp)
-        )
+        if (canManagePlans) {
+            Text(
+                text = "Select the plan that best fits your needs",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 24.dp)
+            )
+        }
 
         if (isLoading) {
             Box(
@@ -1533,6 +1625,45 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
                 CircularProgressIndicator()
             }
         } else {
+            // Show external subscription message if not manageable here
+            if (!canManagePlans) {
+                val platformName = when (managedBy?.lowercase()) {
+                    "apple" -> "Apple App Store"
+                    else -> "external platform"
+                }
+                
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(20.dp)
+                    ) {
+                        Text(
+                            text = "External Subscription",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+                        Text(
+                            text = "Your subscription is currently managed through $platformName. To change plans or cancel your subscription, please visit the platform where you originally subscribed.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                // Show current plan
+                Text(
+                    text = "Your Current Plan:",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(bottom = 16.dp)
+                )
+            }
+            
             // Error message if any
             errorMessage?.let { error ->
                 Card(
@@ -1581,19 +1712,21 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
             }
         }
         
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        // Additional info
-        Text(
-            text = "All plans include:",
-            style = MaterialTheme.typography.titleSmall,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        Text(
-            text = "• Secure cloud storage\n• Audio transcription\n• Collection sharing\n• Cross-device sync\n• Cancel anytime",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        if (canManagePlans) {
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            // Additional info
+            Text(
+                text = "All plans include:",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            Text(
+                text = "• Secure cloud storage\n• Audio transcription\n• Collection sharing\n• Cross-device sync\n• Cancel anytime",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -1605,14 +1738,17 @@ private fun SubscriptionCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = if (tier.isPopular) 
+            containerColor = if (tier.isCurrent)
+                BrandColors.Green.copy(alpha = 0.15f)
+            else if (tier.isPopular) 
                 MaterialTheme.colorScheme.primaryContainer 
             else 
                 MaterialTheme.colorScheme.surface
         ),
         elevation = CardDefaults.cardElevation(
             defaultElevation = if (tier.isPopular) 8.dp else 2.dp
-        )
+        ),
+        border = if (tier.isCurrent) androidx.compose.foundation.BorderStroke(2.dp, BrandColors.Green) else null
     ) {
         Column(
             modifier = Modifier.padding(20.dp)
@@ -1705,23 +1841,41 @@ private fun SubscriptionCard(
             
             Spacer(modifier = Modifier.height(16.dp))
             
-            // Select button
-            Button(
-                onClick = onSelect,
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !tier.isCurrent,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (tier.isPopular) 
-                        BrandColors.Orange 
-                    else 
-                        MaterialTheme.colorScheme.primary,
-                    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Text(
-                    text = if (tier.isCurrent) "Current Plan" else "Select ${tier.name}",
-                    style = MaterialTheme.typography.labelLarge
-                )
+            // Select button or current plan indicator
+            if (tier.isCurrent) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            color = BrandColors.Green.copy(alpha = 0.2f),
+                            shape = MaterialTheme.shapes.medium
+                        )
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Current Plan",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = BrandColors.Green,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                    )
+                }
+            } else {
+                Button(
+                    onClick = onSelect,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (tier.isPopular) 
+                            BrandColors.Orange 
+                        else 
+                            MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Text(
+                        text = "Select ${tier.name}",
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                }
             }
         }
     }
@@ -2998,7 +3152,8 @@ data class UserPlanData(
     val planId: String,
     val planName: String,
     val numberItemsLimit: Int,
-    val totalItems: Int
+    val totalItems: Int,
+    val managedBy: String?
 )
 
 suspend private fun fetchLatestItems(activity: ComposeMainActivity): List<ItemData> {
@@ -3159,8 +3314,17 @@ suspend private fun fetchUserPlan(activity: ComposeMainActivity): UserPlanData? 
                         val planName = obj["plan_name"]?.jsonPrimitive?.contentOrNull ?: "Unknown"
                         val numberItemsLimit = obj["number_items_limit"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
                         val totalItems = obj["total_items"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
-                        android.util.Log.d("FetchUserPlan", "Plan: name=$planName, limit=$numberItemsLimit, total=$totalItems")
-                        UserPlanData(planId, planName, numberItemsLimit, totalItems)
+                        
+                        // Detailed logging for managed_by field
+                        val managedByElement = obj["managed_by"]
+                        android.util.Log.d("FetchUserPlan", "managed_by element: $managedByElement")
+                        android.util.Log.d("FetchUserPlan", "managed_by element type: ${managedByElement?.javaClass?.simpleName}")
+                        val managedBy = managedByElement?.jsonPrimitive?.contentOrNull
+                        android.util.Log.d("FetchUserPlan", "managed_by value: '$managedBy' (type: ${managedBy?.javaClass?.simpleName})")
+                        android.util.Log.d("FetchUserPlan", "managed_by isEmpty: ${managedBy?.isEmpty()}, isBlank: ${managedBy?.isBlank()}, isNull: ${managedBy == null}")
+                        
+                        android.util.Log.d("FetchUserPlan", "Plan: name=$planName, limit=$numberItemsLimit, total=$totalItems, managedBy=$managedBy")
+                        UserPlanData(planId, planName, numberItemsLimit, totalItems, managedBy)
                     } else {
                         null
                     }
