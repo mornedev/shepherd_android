@@ -18,8 +18,8 @@ android {
         applicationId = "com.mamlambofossils.legacyhound"
         minSdk = 31
         targetSdk = 36
-        versionCode = 10
-        versionName = "1.27"
+        versionCode = 11
+        versionName = "1.28"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

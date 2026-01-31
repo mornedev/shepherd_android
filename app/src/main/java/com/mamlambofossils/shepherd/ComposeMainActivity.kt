@@ -1436,7 +1436,7 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
                     "High-quality photo storage",
                     "5 photos per item",
                     "30 second audio recordings",
-                    "5 collections"
+                    "2 collections"
                 )
             )
             BillingManager.PRODUCT_STANDARD -> Triple(
@@ -1458,11 +1458,7 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
                     "High-quality photo storage",
                     "1 minute audio recordings",
                     "Unlimited collections",
-                    "Share collections",
-                    "Priority support",
-                    "Advanced organization",
-                    "Export & backup tools",
-                    "Premium support"
+                    "Priority support"
                 )
             )
             else -> Triple("Unknown", "Unknown", emptyList())
@@ -1472,19 +1468,13 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
     // Debug logging
     val currentPlan = userPlanData?.planId
     val managedBy = userPlanData?.managedBy
-    android.util.Log.d("UpgradePlanScreen", "=== PLAN MANAGEMENT DEBUG ===")
-    android.util.Log.d("UpgradePlanScreen", "currentPlan from API: $currentPlan")
-    android.util.Log.d("UpgradePlanScreen", "managedBy from API: '$managedBy'")
-    android.util.Log.d("UpgradePlanScreen", "managedBy type: ${managedBy?.javaClass?.simpleName}")
-    android.util.Log.d("UpgradePlanScreen", "managedBy isNull: ${managedBy == null}")
-    android.util.Log.d("UpgradePlanScreen", "managedBy isEmpty: ${managedBy?.isEmpty()}")
-    android.util.Log.d("UpgradePlanScreen", "managedBy isBlank: ${managedBy?.isBlank()}")
-    
+    android.util.Log.d("UpgradePlanScreen", "=== CANCEL BUTTON DEBUG ===")
+    android.util.Log.d("UpgradePlanScreen", "currentPlan: $currentPlan")
+    android.util.Log.d("UpgradePlanScreen", "managedBy: '$managedBy'")
+
     // Check if plans can be managed here (only if managed_by is empty or "google")
     val canManagePlans = managedBy.isNullOrEmpty() || managedBy.lowercase() == "google"
-    android.util.Log.d("UpgradePlanScreen", "canManagePlans result: $canManagePlans")
-    android.util.Log.d("UpgradePlanScreen", "=== END DEBUG ===")
-    android.util.Log.d("UpgradePlanScreen", "")
+
     
     val subscriptionTiers = buildList {
         if (canManagePlans) {
@@ -1518,6 +1508,13 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
                 if (product != null) {
                     val (itemLimit, tierName, features) = getTierInfo(product.productId)
                     val apiPlanId = getApiPlanId(product.productId)
+                    
+                    // Only show "Popular" badge on Standard if user is not on Standard or Premium
+                    val standardPlanId = "d9ae7833-2266-4c9e-baa8-2d3b683c860d"
+                    val premiumPlanId = "64fd5ad8-58f9-4189-8dc7-96ab3b743308"
+                    val isOnStandardOrPremium = currentPlan == standardPlanId || currentPlan == premiumPlanId
+                    val showPopular = product.productId == BillingManager.PRODUCT_STANDARD && !isOnStandardOrPremium
+                    
                     add(
                         SubscriptionTier(
                             id = product.productId,
@@ -1525,7 +1522,7 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
                             price = product.price,
                             itemLimit = itemLimit,
                             features = features,
-                            isPopular = product.productId == BillingManager.PRODUCT_STANDARD,
+                            isPopular = showPopular,
                             isCurrent = currentPlan == apiPlanId
                         )
                     )
@@ -1686,6 +1683,7 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
             subscriptionTiers.forEach { tier ->
                 SubscriptionCard(
                     tier = tier,
+                    currentPlanId = currentPlan,
                     onSelect = {
                         if (tier.id == "free") {
                             Toast.makeText(
@@ -1727,12 +1725,48 @@ private fun UpgradePlanScreen(onBack: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        
+        // Cancel subscription button - only show if managed by Google and not on free plan
+        val freePlanId = "5019a2e2-bf60-451f-ad5b-5066c4065dd5"
+        val isManagedByGoogle = managedBy?.lowercase() == "google"
+        val isNotOnFreePlan = currentPlan != null && currentPlan != freePlanId
+        
+        android.util.Log.d("UpgradePlanScreen", "=== CANCEL BUTTON VISIBILITY CHECK ===")
+        android.util.Log.d("UpgradePlanScreen", "freePlanId: $freePlanId")
+        android.util.Log.d("UpgradePlanScreen", "currentPlan: $currentPlan")
+        android.util.Log.d("UpgradePlanScreen", "managedBy: '$managedBy'")
+        android.util.Log.d("UpgradePlanScreen", "isManagedByGoogle: $isManagedByGoogle")
+        android.util.Log.d("UpgradePlanScreen", "isNotOnFreePlan: $isNotOnFreePlan")
+        android.util.Log.d("UpgradePlanScreen", "Should show button: ${isManagedByGoogle && isNotOnFreePlan}")
+        
+        if (isManagedByGoogle && isNotOnFreePlan) {
+            Spacer(modifier = Modifier.height(24.dp))
+            
+            Button(
+                onClick = {
+                    val intent = android.content.Intent(
+                        android.content.Intent.ACTION_VIEW,
+                        android.net.Uri.parse("https://play.google.com/store/account/subscriptions")
+                    )
+                    activity.startActivity(intent)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Text("Cancel Subscription")
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+        }
     }
 }
 
 @Composable
 private fun SubscriptionCard(
     tier: SubscriptionTier,
+    currentPlanId: String?,
     onSelect: () -> Unit
 ) {
     Card(
@@ -1740,8 +1774,6 @@ private fun SubscriptionCard(
         colors = CardDefaults.cardColors(
             containerColor = if (tier.isCurrent)
                 BrandColors.Green.copy(alpha = 0.15f)
-            else if (tier.isPopular) 
-                MaterialTheme.colorScheme.primaryContainer 
             else 
                 MaterialTheme.colorScheme.surface
         ),
@@ -1762,10 +1794,7 @@ private fun SubscriptionCard(
                 Text(
                     text = tier.name,
                     style = MaterialTheme.typography.titleLarge,
-                    color = if (tier.isPopular) 
-                        MaterialTheme.colorScheme.onPrimaryContainer 
-                    else 
-                        MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 if (tier.isPopular) {
                     Card(
@@ -1792,10 +1821,7 @@ private fun SubscriptionCard(
                 Text(
                     text = tier.price,
                     style = MaterialTheme.typography.headlineMedium,
-                    color = if (tier.isPopular) 
-                        MaterialTheme.colorScheme.onPrimaryContainer 
-                    else 
-                        MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 if (tier.price != "$0") {
                     Spacer(modifier = Modifier.width(4.dp))
@@ -1807,10 +1833,7 @@ private fun SubscriptionCard(
             Text(
                 text = tier.itemLimit,
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (tier.isPopular) 
-                    MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
-                else 
-                    MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             
             Spacer(modifier = Modifier.height(16.dp))
@@ -1831,10 +1854,7 @@ private fun SubscriptionCard(
                     Text(
                         text = feature,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = if (tier.isPopular) 
-                            MaterialTheme.colorScheme.onPrimaryContainer 
-                        else 
-                            MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
             }
@@ -1861,20 +1881,87 @@ private fun SubscriptionCard(
                     )
                 }
             } else {
-                Button(
-                    onClick = onSelect,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (tier.isPopular) 
-                            BrandColors.Orange 
-                        else 
-                            MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Text(
-                        text = "Select ${tier.name}",
-                        style = MaterialTheme.typography.labelLarge
-                    )
+                // Check if this is the free tier and user is on a paid plan
+                val isFreeTier = tier.id == "free"
+                val paidPlanIds = listOf(
+                    "fafedebf-6032-4b8f-a3df-abf145091c6f", // Starter
+                    "d9ae7833-2266-4c9e-baa8-2d3b683c860d", // Standard
+                    "64fd5ad8-58f9-4189-8dc7-96ab3b743308"  // Premium
+                )
+                val isOnPaidPlan = currentPlanId in paidPlanIds
+                
+                if (isFreeTier && isOnPaidPlan) {
+                    // Show text instead of button for free tier when on paid plan
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = MaterialTheme.shapes.medium
+                            )
+                            .padding(vertical = 12.dp, horizontal = 16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Cancel your subscription in the Google Play store to downgrade to free",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                } else {
+                    // Check user's current plan and determine button text/color
+                    val starterPlanId = "fafedebf-6032-4b8f-a3df-abf145091c6f"
+                    val standardPlanId = "d9ae7833-2266-4c9e-baa8-2d3b683c860d"
+                    val premiumPlanId = "64fd5ad8-58f9-4189-8dc7-96ab3b743308"
+                    val isOnStarter = currentPlanId == starterPlanId
+                    val isOnStandard = currentPlanId == standardPlanId
+                    val isOnPremium = currentPlanId == premiumPlanId
+                    
+                    // Determine button text and color based on current plan and tier
+                    val buttonText: String
+                    val buttonColor: androidx.compose.ui.graphics.Color
+                    
+                    when {
+                        // User on Starter viewing Standard or Premium
+                        isOnStarter && (tier.id == BillingManager.PRODUCT_STANDARD || tier.id == BillingManager.PRODUCT_PREMIUM) -> {
+                            buttonText = "Upgrade to ${tier.name}"
+                            buttonColor = BrandColors.Green
+                        }
+                        // User on Standard viewing Starter
+                        isOnStandard && tier.id == BillingManager.PRODUCT_STARTER -> {
+                            buttonText = "Downgrade to ${tier.name}"
+                            buttonColor = MaterialTheme.colorScheme.primary
+                        }
+                        // User on Standard viewing Premium
+                        isOnStandard && tier.id == BillingManager.PRODUCT_PREMIUM -> {
+                            buttonText = "Upgrade to ${tier.name}"
+                            buttonColor = BrandColors.Green
+                        }
+                        // User on Premium viewing Starter or Standard
+                        isOnPremium && (tier.id == BillingManager.PRODUCT_STARTER || tier.id == BillingManager.PRODUCT_STANDARD) -> {
+                            buttonText = "Downgrade to ${tier.name}"
+                            buttonColor = MaterialTheme.colorScheme.primary
+                        }
+                        // Default for all other cases
+                        else -> {
+                            buttonText = "Select ${tier.name}"
+                            buttonColor = MaterialTheme.colorScheme.primary
+                        }
+                    }
+                    
+                    Button(
+                        onClick = onSelect,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = buttonColor
+                        )
+                    ) {
+                        Text(
+                            text = buttonText,
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
                 }
             }
         }
@@ -2244,8 +2331,11 @@ private fun WelcomeScreen(
                 }
                 
                 // Check if user has reached plan limit
+                // For free users, enforce 15 item limit
                 val planLimitReached = userPlan?.let { 
-                    it.totalItems >= it.numberItemsLimit 
+                    val freePlanId = "5019a2e2-bf60-451f-ad5b-5066c4065dd5"
+                    val limit = if (it.planId == freePlanId) 15 else it.numberItemsLimit
+                    it.totalItems >= limit
                 } ?: false
                 
                 Button(onClick = {
